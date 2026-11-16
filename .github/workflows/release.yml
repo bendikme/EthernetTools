@@ -1,6 +1,6 @@
 # Builds, tests and publishes EthernetTools when a version tag is pushed.
 #
-#   git tag v26.11.0 && git push origin v26.11.0
+#   git tag v26.11.1 && git push origin v26.11.1
 #
 # The file that is published is the file the start-up check ran against.
 # The DYNATEC Portal's Applications page offers the newest release's
@@ -23,9 +23,10 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # The Node 24 majors (the v4 actions run on Node 20, which GitHub retires).
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
 
