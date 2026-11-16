@@ -13,7 +13,7 @@ namespace EthernetTools;
 /// embedded) and the Set Name dialog. One line per check on standard output (UTF-8); exit code 0 when every check
 /// passes. Test\SmokeTest.ps1 runs it, and so does the release workflow.
 /// </summary>
-internal static class SelfTest
+internal static partial class SelfTest
 {
     private static TextWriter _out = TextWriter.Null;
     private static int _passed, _failed;
@@ -29,6 +29,10 @@ internal static class SelfTest
             IdentifyAnswers();
             StationNames();
             SetNameDialog();
+            Snmp();
+            LldpFrames();
+            SnmpTables();
+            TopologyMap();
         }
         catch (Exception ex)
         {

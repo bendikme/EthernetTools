@@ -13,6 +13,8 @@ public partial class MainForm : Form
     private readonly List<NetDevice> _allDevices = new();
     private readonly Dictionary<string, NetDevice> _byMac = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<NetDevice> _pending = new();
+    private readonly ConcurrentQueue<LldpNeighbor> _lldpHeard = new(); // on the adapter, during the last scan
+    private AdapterInfo? _scannedAdapter;
     private CancellationTokenSource? _cts;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly System.Windows.Forms.Timer _drainTimer;
@@ -110,6 +112,8 @@ public partial class MainForm : Form
         _devices.Clear();
         _allDevices.Clear();
         _byMac.Clear();
+        _lldpHeard.Clear();
+        _scannedAdapter = adapter;
         UpdateCounters();
 
         SetScanningUi(true);
@@ -126,6 +130,7 @@ public partial class MainForm : Form
             // Cheap: just queue. Drained on the UI thread by _drainTimer.
             _pending.Enqueue(dev);
         };
+        scanner.LldpHeard += n => _lldpHeard.Enqueue(n);
         var status = new Progress<string>(s =>
         {
             if (!IsDisposed) lblStatus.Text = s;
@@ -421,6 +426,40 @@ public partial class MainForm : Form
             () => DcpSet.FlashAsync(adapter, dev.MacAddress));
         if (outcome is { Done: true })
             lblStatus.Text = $"{dev.MacString} flashes its LED.";
+    }
+
+    // ---- Topology map ---------------------------------------------------------------------------
+
+    private void OnTopology()
+    {
+        if (_allDevices.Count == 0 || _scannedAdapter is null)
+        {
+            MessageBox.Show(this, "Scan first: the map is drawn from the devices the scan finds.", "Topology",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        // one LLDP neighbour per chassis and port
+        var heard = _lldpHeard.GroupBy(n => (n.Chassis, n.Port)).Select(g => g.Last()).ToList();
+        var form = new TopologyForm(_scannedAdapter, _allDevices.ToList(), heard, SelectDevice);
+        form.Show(this);
+    }
+
+    /// <summary>Select <paramref name="dev"/> in the list (clearing the filter when it hides it) and bring the window up.</summary>
+    private void SelectDevice(NetDevice dev)
+    {
+        int row = _devices.IndexOf(dev);
+        if (row < 0 && tstFilter.Text.Length > 0)
+        {
+            tstFilter.Text = "";
+            _filterTimer.Stop();
+            ApplyFilter();
+            row = _devices.IndexOf(dev);
+        }
+        if (row < 0) return;
+        gridDevices.ClearSelection();
+        gridDevices.CurrentCell = gridDevices.Rows[row].Cells[0];
+        gridDevices.Rows[row].Selected = true;
+        Activate();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)

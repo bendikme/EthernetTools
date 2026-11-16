@@ -16,6 +16,9 @@ public sealed class NetworkScanner
 {
     public event Action<NetDevice>? DeviceDiscoveredOrUpdated;
 
+    /// <summary>An LLDP frame heard on the adapter: the neighbour it is plugged into (for the topology map).</summary>
+    public event Action<LldpNeighbor>? LldpHeard;
+
     public async Task<IReadOnlyList<NetDevice>> ScanAsync(
         AdapterInfo adapter,
         TimeSpan timeout,
@@ -53,7 +56,8 @@ public sealed class NetworkScanner
         {
             // BPF: ARP, Profinet DCP, or any IPv4 (for passive MAC/IP learning) - and DCP behind an 802.1Q tag:
             // Profinet devices often answer priority-tagged. ("vlan" shifts the offsets of what follows it, so it is last.)
-            try { pcap.Filter = "arp or (ether proto 0x8892) or ip or (vlan and ether proto 0x8892)"; } catch { }
+            // LLDP too: who the adapter is plugged into, for the topology map.
+            try { pcap.Filter = "arp or (ether proto 0x8892) or (ether proto 0x88cc) or ip or (vlan and ether proto 0x8892)"; } catch { }
 
             pcap.OnPacketArrival += OnPacket;
             pcap.StartCapture();
@@ -175,6 +179,12 @@ public sealed class NetworkScanner
                                 dev.Sources |= DiscoverySource.Profinet;
                                 DeviceDiscoveredOrUpdated?.Invoke(dev);
                             }
+                            break;
+                        }
+
+                    case Lldp.EtherType:
+                        {
+                            if (Lldp.Read(data) is { } neighbor) LldpHeard?.Invoke(neighbor);
                             break;
                         }
 

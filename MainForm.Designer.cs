@@ -33,6 +33,7 @@ partial class MainForm
     private ToolStripButton tsbCopyRow = null!;
     private ToolStripSeparator tsSep2 = null!;
     private ToolStripButton tsbExportCsv = null!;
+    private ToolStripButton tsbTopology = null!;
     private ToolStripSeparator tsSep3 = null!;
     private ToolStripLabel tslFilter = null!;
     private ToolStripTextBox tstFilter = null!;
@@ -155,6 +156,7 @@ partial class MainForm
         tsbCopyRow = new ToolStripButton("Copy Row") { DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsSep2 = new ToolStripSeparator();
         tsbExportCsv = new ToolStripButton("Export CSV...") { DisplayStyle = ToolStripItemDisplayStyle.Text };
+        tsbTopology = new ToolStripButton("Topology...") { ToolTipText = "Map of the scanned network: switches, ports and devices (LLDP and SNMP)", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsSep3 = new ToolStripSeparator { Alignment = ToolStripItemAlignment.Right };
         tslFilter = new ToolStripLabel("Filter:") { Alignment = ToolStripItemAlignment.Right };
         tstFilter = new ToolStripTextBox { Width = 180, Alignment = ToolStripItemAlignment.Right, ToolTipText = "Filter by MAC, IP, name or vendor" };
@@ -170,12 +172,13 @@ partial class MainForm
         tsbCopyMac.Click += (_, _) => OnCopy(c => c.MacString);
         tsbCopyRow.Click += (_, _) => OnCopy(FormatRow);
         tsbExportCsv.Click += (_, _) => OnExportCsv();
+        tsbTopology.Click += (_, _) => OnTopology();
 
         toolStrip.Items.AddRange(new ToolStripItem[]
         {
             tsbPing, tsbTraceroute, tsbPortScan, tsbOpenWeb, tsbWol, tsbFlash, tsbSetName,
             tsSep1, tsbCopyIp, tsbCopyMac, tsbCopyRow,
-            tsSep2, tsbExportCsv,
+            tsSep2, tsbExportCsv, tsbTopology,
             tstFilter, tslFilter, tsSep3,
         });
 

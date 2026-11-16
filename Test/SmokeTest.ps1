@@ -9,7 +9,7 @@
 #
 #  Then checks, through UI Automation on the real window:
 #    - the window opens, its title carries the version
-#    - the toolbar offers Flash LED and Set Name...
+#    - the toolbar offers Flash LED, Set Name... and Topology...
 #    - the adapter list is filled when the window loads (the status line
 #      leaves "Ready."); with Npcap on this machine it must say
 #      "<n> Ethernet adapter(s) found." - so the single-file build really loads
@@ -95,7 +95,7 @@ try {
 
     # ---- The Profinet tools are on the toolbar -------------------------------------
     $names = @(Find-All $window $CT::Button | ForEach-Object { $_.Current.Name })
-    Check "toolbar offers Flash LED and Set Name..." (($names -contains "Flash LED") -and ($names -contains "Set Name...")) "buttons: $($names -join ', ')"
+    Check "toolbar offers Flash LED, Set Name... and Topology..." (($names -contains "Flash LED") -and ($names -contains "Set Name...") -and ($names -contains "Topology...")) "buttons: $($names -join ', ')"
 
     # ---- Adapters are listed when the window loads ------------------------------
     $status = $null
