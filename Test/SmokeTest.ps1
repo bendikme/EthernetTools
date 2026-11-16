@@ -3,8 +3,13 @@
 #
 #    Test\SmokeTest.ps1 -Exe <path to EthernetTools.exe> [-Version 26.11.0]
 #
-#  Checks, through UI Automation on the real window:
+#  First runs  EthernetTools.exe --selftest  (SelfTest.cs: the Profinet DCP
+#  frames byte by byte, the reading of the devices' answers, the station-name
+#  rules, the Set Name dialog - all without a network) and shows its lines.
+#
+#  Then checks, through UI Automation on the real window:
 #    - the window opens, its title carries the version
+#    - the toolbar offers Flash LED and Set Name...
 #    - the adapter list is filled when the window loads (the status line
 #      leaves "Ready."); with Npcap on this machine it must say
 #      "<n> Ethernet adapter(s) found." - so the single-file build really loads
@@ -61,6 +66,20 @@ $Exe = (Resolve-Path $Exe).Path
 $npcap = Test-Path (Join-Path $env:SystemRoot "System32\Npcap\wpcap.dll")
 Write-Host ("Smoke test: {0}  (Npcap on this machine: {1})" -f $Exe, $(if ($npcap) { "yes" } else { "no" })) -ForegroundColor Cyan
 
+# ---- Self-test (no window, no network) ----------------------------------------------
+$selfLog = Join-Path ([System.IO.Path]::GetTempPath()) ("ethtools-selftest-" + [Guid]::NewGuid().ToString("N") + ".txt")
+try {
+    $self = Start-Process -FilePath $Exe -ArgumentList "--selftest" -PassThru -NoNewWindow -RedirectStandardOutput $selfLog
+    $null = $self.Handle  # hold the handle, or Windows PowerShell 5.1 loses the exit code
+    $selfDone = $self.WaitForExit($TimeoutSec * 1000)
+    if (-not $selfDone) { Stop-Process -Id $self.Id -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $selfLog) { Get-Content $selfLog -Encoding UTF8 | ForEach-Object { Write-Host ("        {0}" -f $_) } }
+    Check "self-test (--selftest) passes" ($selfDone -and $self.ExitCode -eq 0) $(if ($selfDone) { "exit code $($self.ExitCode)" } else { "still running after $TimeoutSec s" })
+}
+finally {
+    if (Test-Path $selfLog) { Remove-Item $selfLog -Force -ErrorAction SilentlyContinue }
+}
+
 $proc = Start-Process -FilePath $Exe -PassThru
 try {
     # ---- The window opens -----------------------------------------------------
@@ -73,6 +92,10 @@ try {
     $title  = $window.Current.Name
     $want   = if ($Version) { "EthernetTools v$Version " } else { "EthernetTools v" }
     Check "title carries the version ('$title')" ($title.StartsWith($want)) "expected it to start with '$want'"
+
+    # ---- The Profinet tools are on the toolbar -------------------------------------
+    $names = @(Find-All $window $CT::Button | ForEach-Object { $_.Current.Name })
+    Check "toolbar offers Flash LED and Set Name..." (($names -contains "Flash LED") -and ($names -contains "Set Name...")) "buttons: $($names -join ', ')"
 
     # ---- Adapters are listed when the window loads ------------------------------
     $status = $null

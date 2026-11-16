@@ -1,0 +1,34 @@
+{
+  "$comment": "PROFINET NameOfStation rules (IEC 61158-6-10). A copy of ProfinetTools' tests/fixtures/station-names.json (its commit 72d06be), embedded in EthernetTools.exe and checked by EthernetTools.exe --selftest (SelfTest.cs), so EthernetTools refuses exactly the names ProfinetTools refuses. Keep the two the same.",
+  "valid": [
+    "a",
+    "plc1",
+    "et200sp-u20-k1",
+    "30844-rob-t10",
+    "line1.conveyor-3",
+    "x.y.z",
+    "port-1",
+    "port-12a",
+    "1.2.3",
+    "abcdefghijklmnopqrstuvwxyz0123456789-abcdefghijklmnopqrstuvwxyz"
+  ],
+  "invalid": [
+    "",
+    "-plc",
+    "plc-",
+    "plc..one",
+    ".plc",
+    "plc.",
+    "Plc1",
+    "plc_1",
+    "30844+rob-t10",
+    "plc 1",
+    "ærø",
+    "192.168.0.1",
+    "port-001",
+    "port-001-00002",
+    "port-001.line",
+    "a.-b",
+    "abcdefghijklmnopqrstuvwxyz0123456789-abcdefghijklmnopqrstuvwxyz0"
+  ]
+}

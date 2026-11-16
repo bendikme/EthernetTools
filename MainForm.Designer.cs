@@ -26,6 +26,7 @@ partial class MainForm
     private ToolStripButton tsbOpenWeb = null!;
     private ToolStripButton tsbWol = null!;
     private ToolStripButton tsbFlash = null!;
+    private ToolStripButton tsbSetName = null!;
     private ToolStripSeparator tsSep1 = null!;
     private ToolStripButton tsbCopyIp = null!;
     private ToolStripButton tsbCopyMac = null!;
@@ -147,6 +148,7 @@ partial class MainForm
         tsbOpenWeb = new ToolStripButton("Open Web") { ToolTipText = "Open http://<ip> in default browser", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsbWol = new ToolStripButton("Wake-on-LAN") { ToolTipText = "Send Wake-on-LAN magic packet", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsbFlash = new ToolStripButton("Flash LED") { ToolTipText = "Send Profinet DCP Signal — blinks the device's LED", DisplayStyle = ToolStripItemDisplayStyle.Text };
+        tsbSetName = new ToolStripButton("Set Name...") { ToolTipText = "Give the selected device its Profinet name of station (DCP Set)  F2", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsSep1 = new ToolStripSeparator();
         tsbCopyIp = new ToolStripButton("Copy IP") { DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsbCopyMac = new ToolStripButton("Copy MAC") { DisplayStyle = ToolStripItemDisplayStyle.Text };
@@ -163,6 +165,7 @@ partial class MainForm
         tsbOpenWeb.Click += (_, _) => OnOpenWeb();
         tsbWol.Click += (_, _) => OnWakeOnLan();
         tsbFlash.Click += (_, _) => OnFlash();
+        tsbSetName.Click += (_, _) => OnSetName();
         tsbCopyIp.Click += (_, _) => OnCopy(c => c.IPAddress?.ToString());
         tsbCopyMac.Click += (_, _) => OnCopy(c => c.MacString);
         tsbCopyRow.Click += (_, _) => OnCopy(FormatRow);
@@ -170,7 +173,7 @@ partial class MainForm
 
         toolStrip.Items.AddRange(new ToolStripItem[]
         {
-            tsbPing, tsbTraceroute, tsbPortScan, tsbOpenWeb, tsbWol, tsbFlash,
+            tsbPing, tsbTraceroute, tsbPortScan, tsbOpenWeb, tsbWol, tsbFlash, tsbSetName,
             tsSep1, tsbCopyIp, tsbCopyMac, tsbCopyRow,
             tsSep2, tsbExportCsv,
             tstFilter, tslFilter, tsSep3,
@@ -186,6 +189,7 @@ partial class MainForm
             new ToolStripMenuItem("Open in browser",   null, (_, _) => OnOpenWeb()),
             new ToolStripMenuItem("Wake-on-LAN",       null, (_, _) => OnWakeOnLan()),
             new ToolStripMenuItem("Flash LED (Profinet)", null, (_, _) => OnFlash()),
+            new ToolStripMenuItem("Set name of station (Profinet)...", null, (_, _) => OnSetName()) { ShortcutKeyDisplayString = "F2" },
             new ToolStripSeparator(),
             new ToolStripMenuItem("Copy IP",           null, (_, _) => OnCopy(c => c.IPAddress?.ToString())),
             new ToolStripMenuItem("Copy MAC",          null, (_, _) => OnCopy(c => c.MacString)),

@@ -20,7 +20,7 @@
        (year.month.patch; the release tag is v<version>)
        ============================================================ -->
   <PropertyGroup>
-    <Version>26.11.0</Version>
+    <Version>26.11.1</Version>
     <Product>EthernetTools</Product>
     <Description>Ethernet / Profinet device discovery</Description>
     <Copyright>Copyright (C) 2026 Bendik Eide. All rights reserved.</Copyright>
@@ -36,6 +36,8 @@
   <ItemGroup>
     <!-- The window icon (the exe's own icon comes from ApplicationIcon). -->
     <EmbeddedResource Include="app.ico" LogicalName="EthernetTools.app.ico" />
+    <!-- The station-name cases the self-test checks (SelfTest.cs). -->
+    <EmbeddedResource Include="Test\station-names.json" LogicalName="EthernetTools.station-names.json" />
   </ItemGroup>
 
 </Project>

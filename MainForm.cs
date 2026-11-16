@@ -347,29 +347,122 @@ public partial class MainForm : Form
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Port scan error"); }
     }
 
-    private void OnFlash()
+    // ---- Profinet DCP Set: Flash LED, Set Name -------------------------------------------
+    // Each waits for the device's answer (up to 3 s) and says what it answered. They open their own
+    // capture handle (DcpSet), so they may run while a scan does.
+
+    private bool _dcpBusy;
+
+    private bool RequireDcpTarget(out NetDevice dev, out AdapterInfo adapter)
     {
-        var dev = SelectedDevice;
-        if (dev is null)
+        dev = null!;
+        adapter = null!;
+        if (SelectedDevice is not { } d)
         {
             MessageBox.Show(this, "Select a device first.", "No selection",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            return false;
         }
-        if (cmbAdapters.SelectedItem is not AdapterInfo adapter)
+        if (cmbAdapters.SelectedItem is not AdapterInfo a)
         {
-            MessageBox.Show(this, "Select an adapter first.", "No adapter");
-            return;
+            MessageBox.Show(this, "Select an adapter first.", "No adapter",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
         }
+        if (_dcpBusy)
+        {
+            lblStatus.Text = "Waiting for the device's answer - try again in a moment.";
+            return false;
+        }
+        dev = d;
+        adapter = a;
+        return true;
+    }
+
+    /// <summary>
+    /// Run a DCP Set and report what came of it: on success nothing (the caller says what was done), otherwise in the
+    /// status line and a message box. Null when it could not be sent at all.
+    /// </summary>
+    private async Task<DcpSetOutcome?> RunDcpSetAsync(NetDevice dev, string busyText, string refusedText, string title,
+        Func<Task<DcpSetOutcome>> set)
+    {
+        _dcpBusy = true;
+        lblStatus.Text = busyText;
         try
         {
-            DcpFlash.Flash(adapter, dev.MacAddress);
-            lblStatus.Text = $"DCP Flash sent to {dev.MacString} \u2014 the device's LED should blink.";
+            var outcome = await set();
+            if (!outcome.Done)
+            {
+                string text = outcome.Answered
+                    ? $"{dev.MacString} {refusedText}: {outcome.Message}."
+                    : $"{dev.MacString} did not answer within {DcpSet.AnswerTimeout.TotalSeconds:0} s. " +
+                      "Is it on this adapter's network, and powered?";
+                lblStatus.Text = text;
+                MessageBox.Show(this, text, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            return outcome;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Flash failed",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            lblStatus.Text = $"{title}: {ex.Message}";
+            MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+        finally
+        {
+            _dcpBusy = false;
+        }
+    }
+
+    private async void OnFlash()
+    {
+        if (!RequireDcpTarget(out var dev, out var adapter)) return;
+        var outcome = await RunDcpSetAsync(dev, $"Flash LED: asking {dev.MacString}...", "refused to flash its LED", "Flash LED",
+            () => DcpSet.FlashAsync(adapter, dev.MacAddress));
+        if (outcome is { Done: true })
+            lblStatus.Text = $"{dev.MacString} flashes its LED.";
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        // F2 renames, as in Explorer: Set Name for the selected device.
+        if (keyData == Keys.F2)
+        {
+            OnSetName();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private async void OnSetName()
+    {
+        if (!RequireDcpTarget(out var dev, out var adapter)) return;
+
+        string device = string.Join("   ", new[] { dev.MacString, dev.IPAddress?.ToString(), dev.VendorName }
+            .Where(s => !string.IsNullOrEmpty(s)));
+        string name;
+        using (var dlg = new SetNameForm(device, dev.NameOfStation))
+        {
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            name = dlg.NewName;
+        }
+
+        // Two devices with one name: the controller reaches neither.
+        var holder = _allDevices.FirstOrDefault(d => !ReferenceEquals(d, dev) && d.NameOfStation == name);
+        if (holder is not null && MessageBox.Show(this,
+                $"{holder.MacString} already has the name \"{name}\". Two devices with one name stop the PLC from " +
+                $"reaching either.\n\nGive it to {dev.MacString} anyway?",
+                "Name in use", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            return;
+
+        var outcome = await RunDcpSetAsync(dev, $"Setting the name of {dev.MacString} to \"{name}\"...",
+            $"refused the name \"{name}\"", "Set Name", () => DcpSet.SetNameAsync(adapter, dev.MacAddress, name));
+        if (outcome is { Done: true })
+        {
+            dev.NameOfStation = name;
+            int row = _devices.IndexOf(dev);
+            if (row >= 0) _devices.ResetItem(row);
+            lblStatus.Text = $"{dev.MacString} is now named \"{name}\".";
         }
     }
 

@@ -1,8 +1,8 @@
 # EthernetTools
 
 Finds the devices on an Ethernet network — **Profinet** devices in any subnet, PCs, PLCs, printers — and gives
-the everyday tools for them in one window: ping, traceroute, port scan, Wake-on-LAN, Profinet *Flash LED*,
-open the web page, copy and export.
+the everyday tools for them in one window: ping, traceroute, port scan, Wake-on-LAN, Profinet *Flash LED* and
+*Set Name* (name of station), open the web page, copy and export.
 
 No installer and no .NET to install: `EthernetTools.exe` is a single file with its runtime inside. It needs
 **Npcap** to send and capture raw Ethernet frames.
@@ -25,9 +25,9 @@ rights needed). Without it the window opens and says so, and only ping, tracerou
 ## The window
 
 ```
-┌ EthernetTools v26.11.0 – Ethernet / Profinet Device Discovery ─────────────────────────────┐
+┌ EthernetTools v26.11.1 – Ethernet / Profinet Device Discovery ─────────────────────────────┐
 │ Adapter: [Ethernet  [Intel(R) Ethernet Connection]       ▾]  Refresh  Timeout (s): 5  Scan  Stop │
-│ Ping  Traceroute  Port Scan  Open Web  Wake-on-LAN  Flash LED │ Copy IP  Copy MAC  Copy Row │ … │
+│ Ping  Traceroute  Port Scan  Open Web  Wake-on-LAN  Flash LED  Set Name... │ Copy IP  Copy MAC … │
 ├──────────────────────────────────────────────────────────────────────────────────────────────┤
 │ MAC Address  IP Address  Name  Vendor  Subnet Mask  Gateway  Source  RTT  Last Seen          │
 │ …                                                                                            │
@@ -65,8 +65,25 @@ From the toolbar or the grid's right-click menu (a double-click pings):
 | Open Web | opens `http://<ip>` in the default browser |
 | Wake-on-LAN | sends a magic packet to the device's MAC |
 | Flash LED | Profinet DCP *Signal*: the device blinks its LED, to find it in the cabinet |
+| Set Name... | Profinet DCP *Set NameOfStation*: gives the device its name of station, kept after a power cycle (see below) |
 | Copy IP / MAC / Row | to the clipboard |
 | Export CSV | the devices in the list, to a `.csv` file |
+
+Flash LED and Set Name wait up to 3 s for the device's answer and say what it answered: done, refused (and
+why), or no answer. They can be used while a scan runs.
+
+### Set Name
+
+Select the device and press **Set Name...** (or **F2**, or right-click it). Type the name of station the controller's
+configuration expects. The dialog checks it as you type, with the same Profinet rules as ProfinetTools:
+- small letters a–z, digits, hyphens and dots;
+- at most 240 characters, and at most 63 between dots;
+- no part that starts or ends with a hyphen;
+- not an IP address, and not `port-xyz`.
+
+Capitals become small letters. If another device in the list already has that name, EthernetTools asks
+before giving it, because two devices with one name stop the PLC from reaching either. A device that is
+connected to its controller (in operation) refuses a new name; EthernetTools shows the refusal.
 
 ### Adapters
 
@@ -101,12 +118,23 @@ runs the start-up check and writes `dist\EthernetTools-<version>-windows-x64.zip
 ### Start-up check
 
 ```powershell
-.\Test\SmokeTest.ps1 -Exe bin\Release\publish-win-x64\EthernetTools.exe -Version 26.11.0
+.\Test\SmokeTest.ps1 -Exe bin\Release\publish-win-x64\EthernetTools.exe -Version 26.11.1
 ```
 
-starts the exe and reads its window through UI Automation: the window opens with the version in its title,
-the adapters are listed through Npcap (on a machine without Npcap: the window says Npcap is missing),
-Refresh answers, and the program closes cleanly.
+first runs `EthernetTools.exe --selftest` (`SelfTest.cs`, no network needed). The self-test checks:
+- the Profinet DCP frames, byte by byte;
+- the reading of the devices' answers, with and without an 802.1Q tag;
+- the station-name rules, on ProfinetTools' cases (`Test/station-names.json`);
+- the Set Name dialog.
+
+Then it starts the exe and reads its window through UI Automation:
+- the window opens with the version in its title;
+- the toolbar offers Flash LED and Set Name;
+- the adapters are listed through Npcap (on a machine without Npcap, the window says Npcap is missing);
+- Refresh answers;
+- the program closes cleanly.
+
+To see the self-test's lines by hand, run `.\EthernetTools.exe --selftest | Out-Host` in PowerShell.
 
 ### Release
 
@@ -133,13 +161,18 @@ The version is in `EthernetTools.csproj` only (`<Version>`, `year.month.patch`);
 | `Program.cs` | entry point |
 | `MainForm.cs`, `MainForm.Designer.cs` | the window: adapter choice, scan, device grid, toolbar actions |
 | `ToolOutputForm.cs` | the output window of ping, traceroute, port scan and the adapter diagnosis |
+| `SetNameForm.cs` | the Set Name dialog |
 | `AppInfo.cs` | the version and the icon |
+| `SelfTest.cs` | `EthernetTools.exe --selftest` |
 | `Pn/NetworkScanner.cs` | the scan: DCP Identify-All, ARP sweep, passive listening, name lookup |
-| `Pn/DcpProtocol.cs`, `Pn/DcpFlash.cs` | Profinet DCP frames (Identify, Signal) |
+| `Pn/DcpProtocol.cs` | Profinet DCP frames: Identify, Signal, Set NameOfStation, and the devices' answers |
+| `Pn/DcpSet.cs` | Flash LED and Set Name: send, and read the device's answer |
+| `Pn/StationName.cs` | the rules of a Profinet name of station |
 | `Pn/ArpProtocol.cs`, `Pn/NameResolver.cs` | ARP frames; NetBIOS and reverse-DNS names |
 | `Pn/AdapterInfo.cs` | adapters: Windows interfaces paired with their Npcap devices |
 | `Pn/PortScanner.cs`, `Pn/WakeOnLan.cs`, `Pn/OuiLookup.cs` | port scan, magic packet, vendor by MAC |
 | `Test/SmokeTest.ps1` | start-up check |
+| `Test/station-names.json` | the station-name cases (a copy of ProfinetTools'), embedded for the self-test |
 | `scripts/` | `release.ps1`, `make-icon.ps1` |
 
 ---

@@ -51,8 +51,9 @@ public sealed class NetworkScanner
 
         try
         {
-            // BPF: ARP, Profinet DCP, or any IPv4 (for passive MAC/IP learning).
-            try { pcap.Filter = "arp or (ether proto 0x8892) or ip"; } catch { }
+            // BPF: ARP, Profinet DCP, or any IPv4 (for passive MAC/IP learning) - and DCP behind an 802.1Q tag:
+            // Profinet devices often answer priority-tagged. ("vlan" shifts the offsets of what follows it, so it is last.)
+            try { pcap.Filter = "arp or (ether proto 0x8892) or ip or (vlan and ether proto 0x8892)"; } catch { }
 
             pcap.OnPacketArrival += OnPacket;
             pcap.StartCapture();
@@ -155,6 +156,8 @@ public sealed class NetworkScanner
                 if (data.Length < 14) return;
 
                 ushort etherType = (ushort)((data[12] << 8) | data[13]);
+                if (etherType == DcpProtocol.EtherTypeVlan && DcpProtocol.ProfinetOffset(data) > 0)
+                    etherType = DcpProtocol.EtherTypeProfinet; // a priority-tagged DCP answer
 
                 // Source MAC for any frame.
                 var srcMacBytes = data.AsSpan(6, 6).ToArray();
