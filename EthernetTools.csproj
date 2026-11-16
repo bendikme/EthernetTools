@@ -2,19 +2,40 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>EthernetTools</RootNamespace>
     <AssemblyName>EthernetTools</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <LangVersion>latest</LangVersion>
+    <!-- English only: no localized WinForms resource folders next to the exe. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!-- ============================================================
+       EthernetTools version  -  change ONLY here
+       (year.month.patch; the release tag is v<version>)
+       ============================================================ -->
+  <PropertyGroup>
+    <Version>26.11.0</Version>
+    <Product>EthernetTools</Product>
+    <Description>Ethernet / Profinet device discovery</Description>
+    <Copyright>Copyright (C) 2026 Bendik Eide. All rights reserved.</Copyright>
+    <!-- The exe's product version is exactly <Version>, without "+<commit>". -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="SharpPcap" Version="6.3.0" />
     <PackageReference Include="PacketDotNet" Version="1.4.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The window icon (the exe's own icon comes from ApplicationIcon). -->
+    <EmbeddedResource Include="app.ico" LogicalName="EthernetTools.app.ico" />
   </ItemGroup>
 
 </Project>

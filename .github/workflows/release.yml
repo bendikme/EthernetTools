@@ -1,0 +1,69 @@
+# Builds, tests and publishes EthernetTools when a version tag is pushed.
+#
+#   git tag v26.11.0 && git push origin v26.11.0
+#
+# The file that is published is the file the start-up check ran against.
+# The DYNATEC Portal's Applications page offers the newest release's
+# EthernetTools-<version>-windows-x64.zip (software entry "EthernetTools",
+# tag prefix "v").
+#
+# Code signing: add the repository secrets ETHTOOLS_SIGN_PFX_BASE64 (the
+# code-signing certificate as a base64 .pfx) and ETHTOOLS_SIGN_PFX_PASSWORD.
+# Without them the release is published unsigned.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write        # create the release and upload its file
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Tag must match the project's version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path EthernetTools.csproj -Pattern '<Version>([^<]+)</Version>'
+          $version = $m.Matches[0].Groups[1].Value.Trim()
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match EthernetTools.csproj ($version)"
+          }
+
+      # Windows PowerShell, like on a developer machine. The start-up check
+      # starts EthernetTools.exe and reads its window; the runner has no Npcap,
+      # so the check expects the window to say so instead of listing adapters.
+      - name: Build, test, sign and package
+        shell: powershell
+        env:
+          ETHTOOLS_SIGN_PFX_BASE64: ${{ secrets.ETHTOOLS_SIGN_PFX_BASE64 }}
+          ETHTOOLS_SIGN_PFX_PASSWORD: ${{ secrets.ETHTOOLS_SIGN_PFX_PASSWORD }}
+        run: .\scripts\release.ps1 -TimeoutSec 60
+
+      - name: Stop an EthernetTools.exe the failed check left running
+        if: failure()
+        shell: powershell
+        run: Get-Process EthernetTools -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag     = $env:GITHUB_REF_NAME
+          $version = $tag.Substring(1)
+          $zip     = "dist\EthernetTools-$version-windows-x64.zip"
+          $notes   = "docs\release-notes\$tag.md"
+          if (Test-Path $notes) {
+            gh release create $tag $zip --title "EthernetTools $version" --verify-tag --notes-file $notes
+          } else {
+            gh release create $tag $zip --title "EthernetTools $version" --verify-tag --generate-notes
+          }

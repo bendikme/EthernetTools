@@ -79,14 +79,23 @@ public partial class MainForm : Form
                 ? "No Ethernet adapters found. Is Npcap installed?"
                 : $"{adapters.Count} Ethernet adapter(s) found.";
         }
-        catch (DllNotFoundException)
+        catch (Exception ex) when (IsNpcapMissing(ex))
         {
-            lblStatus.Text = "Npcap not installed. Install from https://npcap.com (with WinPcap-API compat).";
+            lblStatus.Text = "Npcap is not installed. Install it from https://npcap.com and start EthernetTools again.";
         }
         catch (Exception ex)
         {
             lblStatus.Text = "Adapter enumeration failed: " + ex.Message;
         }
+    }
+
+    // wpcap.dll not found - directly, or wrapped (e.g. in a TypeInitializationException
+    // when SharpPcap's static setup is the first to call into it).
+    private static bool IsNpcapMissing(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+            if (ex is DllNotFoundException) return true;
+        return false;
     }
 
     private async void btnScan_Click(object? sender, EventArgs e)

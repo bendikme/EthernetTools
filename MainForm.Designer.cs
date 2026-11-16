@@ -266,7 +266,8 @@ partial class MainForm
         BackColor = Color.FromArgb(250, 250, 252);
         ClientSize = new Size(1100, 620);
         MinimumSize = new Size(900, 400);
-        Text = "Ethernet / Profinet Device Discovery";
+        Text = $"EthernetTools v{AppInfo.Version} – Ethernet / Profinet Device Discovery";
+        if (AppInfo.Icon is { } appIcon) Icon = appIcon;
         StartPosition = FormStartPosition.CenterScreen;
 
         // Add in *reverse* dock order so they stack correctly:
