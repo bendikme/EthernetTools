@@ -220,7 +220,26 @@ internal static partial class SelfTest
         pn2.Neighbors.Add((2, Nb(ChassisMac(2), IfName("4"), "sw-a")));
         var heard = new[] { Nb(ChassisMac(1), IfName("gi1/0/7"), "core", LldpCapabilities.Bridge) };
 
-        var g = TopologyBuilder.Build(devices, new ThisPcInfo("this-pc", Ms(99), "10.0.0.99", "Ethernet"), heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"));
+        // following LLDP: the management addresses neighbours name that were not asked (edge-sw's 10.0.0.200 - the
+        // scan did not find it - and the adapter's neighbour's 10.0.0.250), each once; nothing that cannot be asked
+        var scanned = devices.Select(d => d.IPAddress!).ToHashSet();
+        var heardCore = new LldpNeighbor(ChassisMac(1), IfName("gi1/0/7"), "", "core", "", LldpCapabilities.Bridge, IPAddress.Parse("10.0.0.250"), []);
+        var odd = new LldpNeighbor(Local("x"), Local("y"), "", "", "", LldpCapabilities.None, IPAddress.Parse("224.0.0.1"), []);
+        var follow = TopologyDiscovery.FollowUp([a, b, pn1, pn2], [heardCore, odd, heardCore], scanned);
+        Check("LLDP is followed: the management addresses not asked yet, each once, no multicast",
+            follow.Select(ip => ip.ToString()).OrderBy(s => s).SequenceEqual(["10.0.0.200", "10.0.0.250"]));
+        Check("addresses worth asking: unicast IPv4 only",
+            TopologyDiscovery.Askable(IPAddress.Parse("10.0.0.1")) && !TopologyDiscovery.Askable(IPAddress.Parse("0.0.0.0"))
+            && !TopologyDiscovery.Askable(IPAddress.Parse("127.0.0.1")) && !TopologyDiscovery.Askable(IPAddress.Parse("239.1.1.1"))
+            && !TopologyDiscovery.Askable(IPAddress.Broadcast) && !TopologyDiscovery.Askable(IPAddress.IPv6Loopback));
+        var aAgain = new SnmpAgentData { Ip = IPAddress.Parse("192.168.1.2"), LocalChassis = ChassisMac(2) };
+        var noChassis = new SnmpAgentData { Ip = IPAddress.Parse("192.168.1.3"), LocalChassis = new LldpId(4, []) };
+        Check("one switch answering on two addresses is one device (its chassis id); another address without a chassis id is not",
+            TopologyDiscovery.SameDevice(a, aAgain) && !TopologyDiscovery.SameDevice(a, b)
+            && !TopologyDiscovery.SameDevice(noChassis, new SnmpAgentData { Ip = IPAddress.Parse("192.168.1.4"), LocalChassis = new LldpId(4, []) }));
+
+        var asked = scanned.Append(IPAddress.Parse("10.0.0.200")).ToList();
+        var g = TopologyBuilder.Build(devices, new ThisPcInfo("this-pc", Ms(99), "10.0.0.99", "Ethernet"), heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"), asked);
         TopoNode N(string name) => g.Nodes.Single(n => n.Name == name);
         bool Linked(string x, string px, string y, string py) => g.Links.Count(l =>
             (l.A.Name == x && l.PortA == px && l.B.Name == y && l.PortB == py) || (l.A.Name == y && l.PortA == py && l.B.Name == x && l.PortB == px)) == 1;
@@ -248,6 +267,14 @@ internal static partial class SelfTest
             && g.Links.Any(l => l.A.Name == "core" && ReferenceEquals(l.B, behind)) && !g.Nodes.Any(n => n.Name == "g31"));
         Check("not located: a device no table names (h6), and one two switches each place behind the other (h7)",
             g.NotLocated is { } nl && nl.Members.Select(m => m.Name).OrderBy(s => s).SequenceEqual(["h6", "h7"]));
+
+        Check("silent switches: the two asked that did not answer (core, edge-sw), each saying so; not the ones that answered",
+            g.Silent.Select(n => n.Name).OrderBy(s => s).SequenceEqual(["core", "edge-sw"])
+            && g.Silent.All(n => n.Detail?.Contains("Did not answer SNMP") == true) && N("sw-a").Detail?.Contains("SNMP") != true);
+        var before = TopologyBuilder.Build(devices, new ThisPcInfo("this-pc", Ms(99), "10.0.0.99", "Ethernet"), heard, [], null);
+        var unasked = TopologyBuilder.Build(devices, new ThisPcInfo("this-pc", Ms(99), "10.0.0.99", "Ethernet"), heard, [a, b, pn1, pn2], null, scanned);
+        Check("no switch is called silent before anything is asked, nor one whose address was not asked",
+            before.Silent.Count == 0 && unasked.Silent.Select(n => n.Name).SequenceEqual(["core"]));
 
         var layout = TopologyLayout.Layout(g);
         bool overlap = layout.Nodes.Any(x => layout.Nodes.Any(y => !ReferenceEquals(x, y) && RectangleF.Intersect(x.Box, y.Box) is { Width: > 0.5f, Height: > 0.5f }));

@@ -81,8 +81,62 @@ public static class TopologyDiscovery
                 progress?.Report($"SNMP: {n}/{addresses.Count} asked, {agents.Count} answered...");
             }
         })).ConfigureAwait(false);
-        return agents.OrderBy(a => a.Ip.GetAddressBytes(), Comparer<byte[]>.Create((x, y) => x.AsSpan().SequenceCompareTo(y))).ToList();
+        return ByAddress(agents);
     }
+
+    /// <summary>
+    /// Ask <paramref name="addresses"/> and follow LLDP from there, the way PRONETA and TIA Portal do: the management
+    /// addresses the agents' neighbours (and <paramref name="heard"/>, the adapter's) report that were not asked yet
+    /// are asked next, round after round, until none is new. That reaches switches the scan did not find (a missed
+    /// ARP answer, a management VLAN or subnet of their own). <paramref name="asked"/> gathers every address asked;
+    /// <paramref name="known"/> are agents an earlier call found (kept, not asked again). A device that answers on
+    /// two of its addresses is kept once.
+    /// </summary>
+    public static async Task<List<SnmpAgentData>> CrawlAsync(IReadOnlyCollection<IPAddress> addresses, IReadOnlyCollection<LldpNeighbor> heard,
+        string community, ISet<IPAddress> asked, IReadOnlyCollection<SnmpAgentData>? known, IProgress<string>? progress, CancellationToken ct,
+        int maxRounds = 6, int maxFollowed = 256)
+    {
+        var agents = new List<SnmpAgentData>(known ?? []);
+        var next = addresses.Distinct().Where(asked.Add).ToList();
+        int followed = 0;
+        for (int round = 0; round < maxRounds; round++)
+        {
+            var follow = FollowUp(agents, heard, asked).Take(Math.Max(0, maxFollowed - followed)).ToList();
+            followed += follow.Count;
+            foreach (var ip in follow) asked.Add(ip);
+            next.AddRange(follow);
+            if (next.Count == 0) break;
+            if (follow.Count > 0) progress?.Report($"SNMP: following LLDP to {follow.Count} more address(es)...");
+            foreach (var agent in await ProbeAsync(next, community, progress, ct).ConfigureAwait(false))
+                if (!agents.Any(a => SameDevice(a, agent))) agents.Add(agent);
+            next = new List<IPAddress>();
+        }
+        return ByAddress(agents);
+    }
+
+    /// <summary>The IPv4 management addresses LLDP names (the agents' neighbours, the adapter's) that are not in <paramref name="asked"/>.</summary>
+    public static List<IPAddress> FollowUp(IEnumerable<SnmpAgentData> agents, IEnumerable<LldpNeighbor> heard, ICollection<IPAddress> asked) =>
+        agents.SelectMany(a => a.Neighbors.Select(n => n.Neighbor)).Concat(heard)
+            .Select(n => n.ManagementAddress)
+            .OfType<IPAddress>()
+            .Where(ip => Askable(ip) && !asked.Contains(ip))
+            .Distinct()
+            .ToList();
+
+    /// <summary>A unicast IPv4 address worth asking: not 0.x, loopback, multicast or broadcast.</summary>
+    public static bool Askable(IPAddress ip)
+    {
+        if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+        byte first = ip.GetAddressBytes()[0];
+        return first is > 0 and < 224 && !IPAddress.IsLoopback(ip);
+    }
+
+    /// <summary>Two answers from one device (two of its addresses): the same LLDP chassis id.</summary>
+    public static bool SameDevice(SnmpAgentData a, SnmpAgentData b) =>
+        a.Ip.Equals(b.Ip) || (a.LocalChassis is { Value.Length: > 0 } x && b.LocalChassis is { } y && x.Equals(y));
+
+    private static List<SnmpAgentData> ByAddress(IEnumerable<SnmpAgentData> agents) =>
+        agents.OrderBy(a => a.Ip.GetAddressBytes(), Comparer<byte[]>.Create((x, y) => x.AsSpan().SequenceCompareTo(y))).ToList();
 
     public static async Task<SnmpAgentData?> ProbeOneAsync(IPAddress ip, string community, CancellationToken ct)
     {

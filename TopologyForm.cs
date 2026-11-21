@@ -17,14 +17,21 @@ internal sealed class TopologyForm : Form
     private readonly List<LldpNeighbor> _heard;
     private readonly Action<NetDevice>? _select;
     private List<SnmpAgentData> _agents = new();
+    /// <summary>The addresses asked over SNMP by the last discovery; null until it has asked.</summary>
+    private HashSet<IPAddress>? _asked;
+    private string _community = "public";
+    /// <summary>The last discovery has listened for LLDP on the adapter to the end.</summary>
+    private bool _listened;
     private TopoGraph? _graph;
     private CancellationTokenSource? _cts;
     private bool _discovering;
 
+    private const int ListenSeconds = 35;
+
     private readonly TopologyView view;
     private readonly ToolStripButton btnDiscover, btnFit, btnExport;
     private readonly ToolStripTextBox txtCommunity;
-    private readonly ToolStripStatusLabel lblStatus;
+    private readonly ToolStripStatusLabel lblStatus, lblWarn;
 
     /// <param name="heard">LLDP neighbours the scan already heard on the adapter.</param>
     /// <param name="select">Selects a device in the main window's list (double-click on a box).</param>
@@ -59,9 +66,12 @@ internal sealed class TopologyForm : Form
                 { Alignment = ToolStripItemAlignment.Right, ForeColor = Color.Gray },
         });
 
-        var status = new StatusStrip();
+        var status = new StatusStrip { ShowItemToolTips = true };
         lblStatus = new ToolStripStatusLabel("") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+        // why the map is not complete: switches that do not answer SNMP, no LLDP heard on the adapter (details in the tooltip)
+        lblWarn = new ToolStripStatusLabel("") { ForeColor = Color.DarkOrange, Visible = false };
         status.Items.Add(lblStatus);
+        status.Items.Add(lblWarn);
 
         view = new TopologyView { Dock = DockStyle.Fill };
         Controls.Add(view);
@@ -96,6 +106,10 @@ internal sealed class TopologyForm : Form
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
+        _community = txtCommunity.Text.Trim();
+        _asked = null;
+        _listened = false;
+        UpdateWarnings();
         try
         {
             // LLDP on the adapter, beside the SNMP questions: who This PC is plugged into (sent every 5-30 s)
@@ -111,17 +125,32 @@ internal sealed class TopologyForm : Form
                 Rebuild(fit: false);
                 });
             };
-            var listening = listener.RunAsync(_adapter, TimeSpan.FromSeconds(35), ct);
+            var listening = listener.RunAsync(_adapter, TimeSpan.FromSeconds(ListenSeconds), ct);
             _ = listening.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
+            // the scanned devices, then whatever their LLDP neighbours name (switches the scan did not find)
             var addresses = _devices.Where(d => d.IPAddress is { AddressFamily: AddressFamily.InterNetwork })
                 .Select(d => d.IPAddress!).Distinct().ToList();
             var progress = new Progress<string>(s => { if (!IsDisposed) lblStatus.Text = s; });
-            _agents = await TopologyDiscovery.ProbeAsync(addresses, txtCommunity.Text.Trim(), progress, ct);
+            var asked = new HashSet<IPAddress>(); // the crawl's own: Rebuild reads _asked on the UI thread meanwhile
+            _agents = await TopologyDiscovery.CrawlAsync(addresses, _heard.ToList(), _community, asked, null, progress, ct);
+            _asked = new HashSet<IPAddress>(asked);
             Rebuild(fit: true);
             lblStatus.Text = Summary() + "  Listening for LLDP on the adapter for a while longer...";
-            try { await listening; } catch (OperationCanceledException) { } catch (Exception) { }
-            if (!IsDisposed) lblStatus.Text = Summary();
+            bool listenedToTheEnd = true;
+            try { await listening; }
+            catch (OperationCanceledException) { listenedToTheEnd = false; }
+            catch (Exception) { listenedToTheEnd = false; }
+            if (IsDisposed || ct.IsCancellationRequested) return;
+            _listened = listenedToTheEnd;
+
+            // what was heard on the adapter meanwhile may name a switch not asked yet
+            int before = _agents.Count;
+            _agents = await TopologyDiscovery.CrawlAsync([], _heard.ToList(), _community, asked, _agents, progress, ct);
+            _asked = new HashSet<IPAddress>(asked);
+            if (IsDisposed) return;
+            Rebuild(fit: _agents.Count != before);
+            lblStatus.Text = Summary();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -139,8 +168,42 @@ internal sealed class TopologyForm : Form
     {
         if (IsDisposed) return;
         var thisPc = new ThisPcInfo(Environment.MachineName, _adapter.MacString(), OwnIPv4()?.ToString(), _adapter.FriendlyName);
-        _graph = TopologyBuilder.Build(_devices, thisPc, _heard, _agents, Gateway());
+        _graph = TopologyBuilder.Build(_devices, thisPc, _heard, _agents, Gateway(), _asked);
         view.SetLayout(TopologyLayout.Layout(_graph), reset: fit);
+        UpdateWarnings();
+    }
+
+    /// <summary>Says, beside the status, why the map is not complete; the whole of it in the tooltip.</summary>
+    private void UpdateWarnings()
+    {
+        if (IsDisposed) return;
+        var shortText = new List<string>();
+        var longText = new List<string>();
+        var silent = _asked is null ? [] : _graph?.Silent ?? [];
+        if (silent.Count > 0)
+        {
+            static string Name(TopoNode n) => n.Name.Length > 0 ? n.Name : n.Ip ?? n.Id;
+            var unanswered = silent.Where(n => n.Ip is { Length: > 0 }).ToList();
+            var noAddress = silent.Where(n => n.Ip is not { Length: > 0 }).ToList();
+            shortText.Add($"No SNMP from {silent.Count} switch(es): {string.Join(", ", silent.Take(3).Select(Name))}{(silent.Count > 3 ? ", ..." : "")}");
+            if (unanswered.Count > 0)
+                longText.Add($"These switches did not answer SNMP (community \"{_community}\"), so their ports and MAC tables are not known: " +
+                             string.Join(", ", unanswered.Select(n => $"{Name(n)} ({n.Ip})")) + ". What is behind them shows as \"port not known\" " +
+                             "or \"not located\". Enable SNMP v1/v2c read-only on them (for this PC's address) for a complete map.");
+            if (noAddress.Count > 0)
+                longText.Add("No management address is known for " + string.Join(", ", noAddress.Select(Name)) +
+                             " (neither the scan nor LLDP gave one), so they could not be asked over SNMP.");
+        }
+        if (_listened && _heard.Count == 0)
+        {
+            shortText.Add($"No LLDP heard on {_adapter.FriendlyName}");
+            longText.Add($"No LLDP was heard on {_adapter.FriendlyName} in {ListenSeconds} s, so This PC's switch port is not known. " +
+                         "The switch port may not send LLDP, or the network card keeps LLDP frames to itself (some Intel X710, XL710 " +
+                         "and E810 cards have a firmware LLDP agent that does). This PC is then placed only by the switches' MAC tables.");
+        }
+        lblWarn.Visible = shortText.Count > 0;
+        lblWarn.Text = "⚠ " + string.Join("  ·  ", shortText);
+        lblWarn.ToolTipText = string.Join("\n\n", longText);
     }
 
     private string Summary()
@@ -150,7 +213,7 @@ internal sealed class TopologyForm : Form
         int answered = _agents.Count;
         int bridges = _agents.Count(a => a.Fdb.Count > 0);
         int notLocated = _graph.NotLocated?.Members.Count ?? 0;
-        return $"{answered} device(s) answered SNMP ({bridges} with a MAC table), {_heard.Count} LLDP neighbour(s) heard on " +
+        return $"{answered} of {_asked?.Count ?? 0} address(es) answered SNMP ({bridges} with a MAC table), {_heard.Count} LLDP neighbour(s) heard on " +
                $"{_adapter.FriendlyName}; {switches} switch(es), {_graph.Links.Count} link(s), {notLocated} device(s) not located.";
     }
 

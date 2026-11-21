@@ -102,6 +102,15 @@ Traceroute sees only routers, never switches or ports. So, as in PRONETA or TIA 
 | **The default gateway** | shown as a router |
 
 SNMP is read-only, v2c with a fallback to v1, community `public` unless you type another one in the window.
+The window asks every scanned device, then follows LLDP: the management address a neighbour announces is asked
+too, even when the scan didn't find it (a switch on a management subnet of its own, say). It repeats this until
+no new address turns up.
+
+When the map can't be complete, the status bar says why in orange. Hover it for the details:
+- **No SNMP from switches:** switches that didn't answer SNMP, or had no address to ask, by name. Their ports
+  and MAC tables stay unknown. Enabling read-only SNMP on them completes the map.
+- **No LLDP heard:** nothing told which switch port This PC is on. The port may not send LLDP, or the network
+  card keeps LLDP to itself (the firmware LLDP agent of some Intel X710, XL710 and E810 cards).
 
 Reading the map:
 - **Solid line:** a cable known from LLDP.
@@ -208,7 +217,7 @@ The version is in `EthernetTools.csproj` only (`<Version>`, `year.month.patch`);
 | `Pn/DcpSet.cs` | Flash LED and Set Name: send, and read the device's answer |
 | `Pn/StationName.cs` | the rules of a Profinet name of station |
 | `Pn/Lldp.cs`, `Pn/Snmp.cs` | LLDP frames; a small read-only SNMP v1/v2c client |
-| `Pn/TopologyDiscovery.cs` | reads LLDP-MIB and BRIDGE-MIB from the devices; listens for LLDP on the adapter |
+| `Pn/TopologyDiscovery.cs` | reads LLDP-MIB and BRIDGE-MIB from the devices, following LLDP to switches the scan missed; listens for LLDP on the adapter |
 | `Pn/Topology.cs`, `Pn/TopologyLayout.cs` | builds the map from what was found; lays it out as a tree |
 | `Pn/ArpProtocol.cs`, `Pn/NameResolver.cs` | ARP frames; NetBIOS and reverse-DNS names |
 | `Pn/AdapterInfo.cs` | adapters: Windows interfaces paired with their Npcap devices |

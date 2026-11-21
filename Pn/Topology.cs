@@ -42,6 +42,11 @@ public sealed class TopoGraph
     public TopoNode? Root { get; set; }
     /// <summary>The devices it could not place (drawn apart, as one group).</summary>
     public TopoNode? NotLocated { get; set; }
+    /// <summary>
+    /// Switches that do not tell their ports and MAC tables: asked over SNMP without an answer, or with no address to
+    /// ask. What is behind them is "port not known" or "not located".
+    /// </summary>
+    public List<TopoNode> Silent { get; } = new();
 }
 
 /// <summary>This PC as the map shows it.</summary>
@@ -65,8 +70,10 @@ public static class TopologyBuilder
     /// <summary>More hosts than this behind one place are drawn as one group box.</summary>
     public const int GroupAbove = 6;
 
+    /// <param name="askedSnmp">The addresses asked over SNMP; null while nothing has been asked yet (no switch is then
+    /// called silent).</param>
     public static TopoGraph Build(IReadOnlyList<NetDevice> devices, ThisPcInfo thisPc, IReadOnlyList<LldpNeighbor> heardOnAdapter,
-        IReadOnlyList<SnmpAgentData> agents, IPAddress? gateway)
+        IReadOnlyList<SnmpAgentData> agents, IPAddress? gateway, IReadOnlyCollection<IPAddress>? askedSnmp = null)
     {
         var graph = new TopoGraph();
         var byMac = new Dictionary<string, TopoNode>(StringComparer.OrdinalIgnoreCase);
@@ -371,6 +378,21 @@ public static class TopologyBuilder
             foreach (var n in lost) graph.Nodes.Remove(n);
             graph.Nodes.Add(notLocated);
             graph.NotLocated = notLocated;
+        }
+
+        // ---- switches that do not tell (their ports, their MAC tables) ------------------------------------------
+        if (askedSnmp is not null)
+        {
+            var asked = askedSnmp.Select(a => a.ToString()).ToHashSet();
+            foreach (var n in graph.Nodes.Concat(graph.NotLocated?.Members ?? []))
+            {
+                if (n.Kind != TopoKind.Switch || n.Managed) continue;
+                if (n.Ip is { Length: > 0 } ip && !asked.Contains(ip)) continue; // not asked (yet)
+                graph.Silent.Add(n);
+                n.Detail = Join(n.Detail, n.Ip is { Length: > 0 }
+                    ? "Did not answer SNMP: its ports and MAC table are not known. Enable SNMP (read-only) on it for a complete map."
+                    : "No management address known: it could not be asked over SNMP, so its ports and MAC table are not known.");
+            }
         }
         return graph;
     }
