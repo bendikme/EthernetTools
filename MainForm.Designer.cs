@@ -34,6 +34,7 @@ partial class MainForm
     private ToolStripSeparator tsSep2 = null!;
     private ToolStripButton tsbExportCsv = null!;
     private ToolStripButton tsbTopology = null!;
+    private ToolStripButton tsbInventory = null!;
     private ToolStripSeparator tsSep3 = null!;
     private ToolStripLabel tslFilter = null!;
     private ToolStripTextBox tstFilter = null!;
@@ -156,6 +157,7 @@ partial class MainForm
         tsbCopyRow = new ToolStripButton("Copy Row") { DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsSep2 = new ToolStripSeparator();
         tsbExportCsv = new ToolStripButton("Export CSV...") { DisplayStyle = ToolStripItemDisplayStyle.Text };
+        tsbInventory = new ToolStripButton("Read I&&M") { ToolTipText = "Read each Profinet device's I&&M0: order number, serial number, hardware and firmware revision", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsbTopology = new ToolStripButton("Topology...") { ToolTipText = "Map of the scanned network: switches, ports and devices (LLDP and SNMP)", DisplayStyle = ToolStripItemDisplayStyle.Text };
         tsSep3 = new ToolStripSeparator { Alignment = ToolStripItemAlignment.Right };
         tslFilter = new ToolStripLabel("Filter:") { Alignment = ToolStripItemAlignment.Right };
@@ -172,13 +174,14 @@ partial class MainForm
         tsbCopyMac.Click += (_, _) => OnCopy(c => c.MacString);
         tsbCopyRow.Click += (_, _) => OnCopy(FormatRow);
         tsbExportCsv.Click += (_, _) => OnExportCsv();
+        tsbInventory.Click += async (_, _) => await OnReadInventoryAsync();
         tsbTopology.Click += (_, _) => OnTopology();
 
         toolStrip.Items.AddRange(new ToolStripItem[]
         {
             tsbPing, tsbTraceroute, tsbPortScan, tsbOpenWeb, tsbWol, tsbFlash, tsbSetName,
             tsSep1, tsbCopyIp, tsbCopyMac, tsbCopyRow,
-            tsSep2, tsbExportCsv, tsbTopology,
+            tsSep2, tsbExportCsv, tsbInventory, tsbTopology,
             tstFilter, tslFilter, tsSep3,
         });
 
@@ -263,6 +266,11 @@ partial class MainForm
             MakeColumn(nameof(NetDevice.SourcesText),  "Source",        105),
             MakeColumn(nameof(NetDevice.RttText),      "RTT",            60),
             MakeColumn(nameof(NetDevice.LastSeenText), "Last Seen",      80),
+            MakeColumn(nameof(NetDevice.Problem),      "Problem",       260),
+            MakeColumn(nameof(NetDevice.OrderNumber),  "Order No.",     150),
+            MakeColumn(nameof(NetDevice.SerialNumber), "Serial No.",    120),
+            MakeColumn(nameof(NetDevice.HardwareRevision), "HW",         45),
+            MakeColumn(nameof(NetDevice.FirmwareVersion),  "FW",         70),
         });
         gridDevices.CellMouseDown += GridDevices_CellMouseDown;
         gridDevices.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) OnPing(); };

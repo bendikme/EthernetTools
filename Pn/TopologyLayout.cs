@@ -104,7 +104,7 @@ public static partial class TopologyLayout
             var a = layout.Nodes.FirstOrDefault(n => ReferenceEquals(n.Node, l.A));
             var b = layout.Nodes.FirstOrDefault(n => ReferenceEquals(n.Node, l.B));
             if (a is null || b is null) continue;
-            layout.Links.Add(new PlacedLink(l, [Center(a.Box), Center(b.Box)], true, l.Source == "MAC table"));
+            layout.Links.Add(new PlacedLink(l, [Center(a.Box), Center(b.Box)], true, Inferred(l)));
         }
 
         var all = layout.Nodes.Select(n => n.Box).Concat(layout.Links.SelectMany(l => l.Path.Select(p => new RectangleF(p, SizeF.Empty))));
@@ -163,10 +163,13 @@ public static partial class TopologyLayout
 
     private static void AddLink(TopoLayout layout, Tree child, PointF[] path)
     {
-        if (child.Link is { } link) layout.Links.Add(new PlacedLink(link, path, false, link.Source == "MAC table"));
+        if (child.Link is { } link) layout.Links.Add(new PlacedLink(link, path, false, Inferred(link)));
     }
 
     /// <summary>"23 ↔ gi1/0/31": the parent's port and the child's; "?" for a port not known.</summary>
+    /// <summary>A cable inferred, not reported by LLDP or CDP at an end: placed by a MAC table, or probable from spanning tree.</summary>
+    public static bool Inferred(TopoLink link) => link.Source.StartsWith("MAC table") || link.Source.EndsWith("(probable)");
+
     public static string CableLabel(string parentPort, string childPort) =>
         parentPort.Length == 0 && childPort.Length == 0 ? "port ?"
         : childPort.Length == 0 ? $"port {parentPort}"

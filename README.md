@@ -54,6 +54,10 @@ Profinet answer or, failing that, from the MAC address. **Stop** ends the scan e
 
 The filter box (top right of the toolbar) narrows the list by MAC, IP, name or vendor.
 
+**Problems.** After a scan, an IPv4 address that two or more MACs claimed in ARP (a duplicate address, or a
+router answering for others: proxy ARP) and a name of station on two or more Profinet devices are shown in the
+**Problem** column, the row tinted red, and counted in the status bar.
+
 ### Tools for the selected device
 
 From the toolbar or the grid's right-click menu (a double-click pings):
@@ -68,7 +72,8 @@ From the toolbar or the grid's right-click menu (a double-click pings):
 | Flash LED | Profinet DCP *Signal*: the device blinks its LED, to find it in the cabinet |
 | Set Name... | Profinet DCP *Set NameOfStation*: gives the device its name of station, kept after a power cycle (see below) |
 | Copy IP / MAC / Row | to the clipboard |
-| Export CSV | the devices in the list, to a `.csv` file |
+| Read I&M | reads I&M0 from every Profinet device with an IP address (PNIO RPC): order number, serial number, hardware and firmware revision, in their own columns |
+| Export CSV | the devices in the list, to a `.csv` file (with the Problem and I&M columns) |
 
 Flash LED and Set Name wait up to 3 s for the device's answer and say what it answered: done, refused (and
 why), or no answer. They can be used while a scan runs.
@@ -96,7 +101,7 @@ Traceroute sees only routers, never switches or ports. So, as in PRONETA or TIA 
 
 | Source | What it gives |
 | ------ | ------------- |
-| **LLDP heard on the adapter** | the switch and port This PC is plugged into (switches send LLDP every 5-30 s; the window listens for 35 s) |
+| **LLDP, CDP and spanning tree heard on the adapter** | the switch and port This PC is plugged into (LLDP every 5-30 s, CDP every 60 s, spanning-tree BPDUs every 2 s; the window listens for 35 s). A BPDU also names the root bridge, and the cost to it: a switch one link's cost from the root is drawn as probably cabled straight to it. A network card that keeps LLDP to itself (Intel X710 ...) still passes CDP and BPDUs. |
 | **SNMP, LLDP-MIB** | each device's neighbour on each of its ports (Profinet devices and managed switches carry it) |
 | **SNMP, BRIDGE-MIB** | a switch's MAC address table: places the devices that don't speak LLDP (PCs, printers) on their port |
 | **Profinet records** | a Profinet device that doesn't answer SNMP: each port's neighbour from its own PDPortDataReal record (as PRONETA reads it) |
@@ -141,11 +146,21 @@ Reading the map:
 - **"Not located":** devices neither LLDP nor any readable MAC table places. This includes devices two switches
   each place behind the other (their tables are of different ages).
 
+**Map ▾** on the window's toolbar:
+- **Save map...** saves the map as a `.json` file: every box and cable, who took it, when.
+- **Compare with a saved map...** says what is **new**, **gone** or **moved** (behind another switch, or on
+  another port) since then, in a report window; new and moved boxes are badged on the map.
+- **Add a map saved on another PC...** adds what that PC knew: its own switch port (from LLDP, CDP or spanning
+  tree) and any port its switches told. A device this map had only as "port not known" moves onto that port.
+  A few PCs at different desks fill in ports no switch tells.
+- **Export PNG...** and **Export draw.io...**: the map as a picture, or as a draw.io diagram (opens in draw.io,
+  and from there in Visio), every box in its place and every cable labelled with its ports.
+
 Using the map:
 - **Move and zoom:** drag to move; the mouse wheel, **+** and **-** zoom; **Fit** (or F) shows the whole map.
 - **Details:** hover a box for its details (system description, MAC, members of a group).
 - **Select:** double-click a box to select that device in the list.
-- **Save:** **Export PNG...** saves the whole map as a picture.
+- **Save:** **Map ▾ ▸ Export PNG...** saves the whole map as a picture.
 - **Refresh:** **Discover again** asks again, for example with another SNMP community.
 
 ### Adapters
@@ -235,7 +250,11 @@ The version is in `EthernetTools.csproj` only (`<Version>`, `year.month.patch`);
 | `Pn/DcpSet.cs` | Flash LED and Set Name: send, and read the device's answer |
 | `Pn/StationName.cs` | the rules of a Profinet name of station |
 | `Pn/Lldp.cs`, `Pn/Snmp.cs`, `Pn/SnmpV3.cs` | LLDP frames; a small read-only SNMP client (v1, v2c, and v3 with USM: MD5/SHA keys and digests, AES-128) |
-| `Pn/ProfinetRpc.cs` | Profinet's own records over PNIO RPC: Read Implicit of PDPortDataReal (a port's neighbour) |
+| `Pn/ProfinetRpc.cs` | Profinet's own records over PNIO RPC: Read Implicit of PDPortDataReal (a port's neighbour) and I&M0 |
+| `Pn/L2Hello.cs` | spanning-tree BPDUs and CDP heard on the adapter, read as neighbours (beside LLDP) |
+| `Pn/Conflicts.cs` | duplicate IP addresses (ARP claims) and names of station |
+| `Pn/TopologySnapshot.cs` | saved maps: save, compare (new, gone, moved), merge another PC's map |
+| `DrawIoExport.cs` | the map as a draw.io diagram |
 | `SnmpV3Form.cs` | the SNMPv3 user dialog of the topology window |
 | `Pn/TopologyDiscovery.cs` | reads LLDP-MIB and BRIDGE-MIB from the devices, following LLDP to switches the scan missed; listens for LLDP on the adapter |
 | `Pn/Topology.cs`, `Pn/TopologyLayout.cs` | builds the map from what was found; lays it out as a tree |

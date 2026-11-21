@@ -34,6 +34,15 @@ public sealed class NetDevice
     public DateTime DiscoveredUtc { get; init; } = DateTime.UtcNow;
     public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
 
+    /// <summary>What is wrong: a duplicate IP address or name of station (null: nothing).</summary>
+    public string? Problem { get; set; }
+
+    /// <summary>Profinet I&amp;M0: order number, serial number, hardware revision, firmware version (V2.9.4).</summary>
+    public string? OrderNumber { get; set; }
+    public string? SerialNumber { get; set; }
+    public string? HardwareRevision { get; set; }
+    public string? FirmwareVersion { get; set; }
+
     /// <summary>Round-trip time of the most recent ping/ARP reply, in milliseconds.</summary>
     public long? RttMs { get; set; }
 

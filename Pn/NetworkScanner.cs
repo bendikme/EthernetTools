@@ -19,6 +19,14 @@ public sealed class NetworkScanner
     /// <summary>An LLDP frame heard on the adapter: the neighbour it is plugged into (for the topology map).</summary>
     public event Action<LldpNeighbor>? LldpHeard;
 
+    private readonly Dictionary<string, HashSet<string>> _claims = new();
+
+    /// <summary>Every MAC seen claiming each IPv4 address in ARP during the scan (more than one: a duplicate, or proxy ARP).</summary>
+    public IReadOnlyDictionary<string, HashSet<string>> IpClaims
+    {
+        get { lock (_claims) return _claims.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase)); }
+    }
+
     public async Task<IReadOnlyList<NetDevice>> ScanAsync(
         AdapterInfo adapter,
         TimeSpan timeout,
@@ -57,7 +65,8 @@ public sealed class NetworkScanner
             // BPF: ARP, Profinet DCP, or any IPv4 (for passive MAC/IP learning) - and DCP behind an 802.1Q tag:
             // Profinet devices often answer priority-tagged. ("vlan" shifts the offsets of what follows it, so it is last.)
             // LLDP too: who the adapter is plugged into, for the topology map.
-            try { pcap.Filter = "arp or (ether proto 0x8892) or (ether proto 0x88cc) or ip or (vlan and ether proto 0x8892)"; } catch { }
+            try { pcap.Filter = "arp or (ether proto 0x8892) or (ether proto 0x88cc) or ip or (vlan and ether proto 0x8892) " +
+                                "or ether dst 01:80:c2:00:00:00 or ether dst 01:00:0c:cc:cc:cc or ether dst 01:00:0c:cc:cc:cd"; } catch { }
 
             pcap.OnPacketArrival += OnPacket;
             pcap.StartCapture();
@@ -169,6 +178,13 @@ public sealed class NetworkScanner
 
                 if (srcAddr.Equals(srcMac)) return; // ignore our own outgoing frames
 
+                // 802.3 frames (a length, not an EtherType): spanning tree and CDP - the switch port this adapter is on
+                if (etherType < 0x0600)
+                {
+                    if ((Stp.Read(data) ?? Cdp.Read(data)) is { } hello) LldpHeard?.Invoke(hello);
+                    return;
+                }
+
                 switch (etherType)
                 {
                     case DcpProtocol.EtherTypeProfinet:
@@ -194,6 +210,13 @@ public sealed class NetworkScanner
                             {
                                 if (arpMac.Equals(srcMac)) return;
                                 if (arpIp.Equals(IPAddress.Any)) return;
+                                string claimer = string.Join(":", arpMac.GetAddressBytes().Select(b => b.ToString("X2")));
+                                lock (_claims)
+                                {
+                                    if (!_claims.TryGetValue(arpIp.ToString(), out var macs))
+                                        _claims[arpIp.ToString()] = macs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                    macs.Add(claimer);
+                                }
                                 var dev = GetOrAdd(arpMac);
                                 dev.IPAddress ??= arpIp;
                                 dev.Sources |= DiscoverySource.Arp;

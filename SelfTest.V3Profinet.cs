@@ -187,11 +187,12 @@ internal static partial class SelfTest
     {
         private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
         private readonly CancellationTokenSource _stop = new();
-        private readonly Dictionary<ushort, byte[]> _ports;
+        private readonly Dictionary<(ushort Index, ushort Subslot), byte[]> _records;
         public Guid? LastObject;
         public int Port => ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
 
-        public FakePnDevice(Dictionary<ushort, byte[]> ports) { _ports = ports; _ = Task.Run(ServeAsync); }
+        public FakePnDevice(Dictionary<ushort, byte[]> ports) : this(ports.ToDictionary(kv => (ProfinetRpc.IndexPdPortDataReal, kv.Key), kv => kv.Value)) { }
+        public FakePnDevice(Dictionary<(ushort Index, ushort Subslot), byte[]> records) { _records = records; _ = Task.Run(ServeAsync); }
 
         private async Task ServeAsync()
         {
@@ -204,8 +205,8 @@ internal static partial class SelfTest
                 LastObject = new Guid(q.AsSpan(8, 16));
                 ushort subslot = BinaryPrimitives.ReadUInt16BigEndian(q.AsSpan(100 + 30));
                 ushort index = BinaryPrimitives.ReadUInt16BigEndian(q.AsSpan(100 + 34));
-                bool have = index == ProfinetRpc.IndexPdPortDataReal && _ports.ContainsKey(subslot);
-                byte[] record = have ? _ports[subslot] : [];
+                bool have = _records.ContainsKey((index, subslot));
+                byte[] record = have ? _records[(index, subslot)] : [];
                 var res = new byte[64];
                 BinaryPrimitives.WriteUInt16BigEndian(res, ProfinetRpc.BlockReadResHeader);
                 BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(2), 60);
@@ -254,7 +255,7 @@ internal static partial class SelfTest
 
         // pn-a's port 1 to switch sw-a port 3 (by chassis MAC), port 2 to pn-b's port 1; port 3 not there
         byte[] swMac = [0x02, 0xAA, 0, 0, 0, 2];
-        using var device = new FakePnDevice(new()
+        using var device = new FakePnDevice(new Dictionary<ushort, byte[]>
         {
             [0x8001] = PortDataReal(0x8001, "port-001", ("3", "02-AA-00-00-00-02", swMac)),
             [0x8002] = PortDataReal(0x8002, "port-002", ("port-001.pn-b", "pn-b", [0x02, 0xAA, 0, 0, 0x0B, 1])),

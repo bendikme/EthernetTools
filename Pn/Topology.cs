@@ -23,6 +23,10 @@ public sealed class TopoNode
     public int UnknownMacs { get; set; }
     /// <summary>It answered SNMP.</summary>
     public bool Managed { get; set; }
+    /// <summary>Against a saved map: "NEW" or "MOVED" (null: the same, or nothing compared).</summary>
+    public string? Change { get; set; }
+    /// <summary>The spanning tree's root bridge (from the BPDUs heard on the adapter).</summary>
+    public bool StpRoot { get; set; }
     /// <summary>Its kind is a guess: a probable switch or access point (it speaks only SNMPv3, made by a network maker).</summary>
     public bool Guessed { get; set; }
 
@@ -256,13 +260,34 @@ public static class TopologyBuilder
                     other.Kind = TopoKind.Switch;
                 Link(node, agent.PortName(localPort), other, TopologyDiscovery.PortName(neighbor.Port, neighbor.PortDescription), "LLDP", ownA: true);
             }
-        foreach (var neighbor in heardOnAdapter)
+        // what the adapter heard: LLDP first (the best port names), then CDP, then spanning tree
+        foreach (var neighbor in heardOnAdapter.OrderBy(L2Hello.Rank))
         {
             var other = Resolve(neighbor);
             if (ReferenceEquals(other, pc)) continue;
             Learn(other, neighbor);
             if (other.Kind == TopoKind.Host && neighbor.Capabilities.HasFlag(LldpCapabilities.Bridge)) other.Kind = TopoKind.Switch;
-            Link(pc, thisPc.AdapterName, other, TopologyDiscovery.PortName(neighbor.Port, neighbor.PortDescription), "LLDP (heard)", ownA: true);
+            Link(pc, thisPc.AdapterName, other, TopologyDiscovery.PortName(neighbor.Port, neighbor.PortDescription), $"{neighbor.Protocol} (heard)", ownA: true);
+        }
+
+        // ---- spanning tree: the root bridge, and the switch This PC is on most likely cabled straight to it -------
+        foreach (var bpdu in heardOnAdapter.Where(n => n.RootBridge is { Length: 6 }).DistinctBy(n => Convert.ToHexString(n.RootBridge!)))
+        {
+            string rootMac = string.Join(":", bpdu.RootBridge!.Select(b => b.ToString("X2")));
+            var sender = Resolve(bpdu);
+            if (!byMac.TryGetValue(rootMac, out var root))
+                root = Add(new TopoNode { Id = "stp:" + rootMac, Kind = TopoKind.Switch, Name = "Root bridge", Mac = rootMac,
+                    Detail = "Known only as the spanning tree's root bridge (its MAC)." });
+            if (root.Kind is TopoKind.Host) { root.Kind = TopoKind.Switch; root.Guessed = false; }
+            root.StpRoot = true;
+            root.Detail = Join(root.Detail, "The spanning tree's root bridge.");
+            if (ReferenceEquals(root, sender)) continue;
+            if (Stp.IsOneLink(bpdu.RootPathCost) && !graph.Links.Any(l => (ReferenceEquals(l.A, sender) && ReferenceEquals(l.B, root)) || (ReferenceEquals(l.A, root) && ReferenceEquals(l.B, sender))))
+            {
+                Link(sender, "", root, "", "STP (probable)");
+                sender.Detail = Join(sender.Detail, $"Its spanning-tree cost to the root ({root.Name}) is {bpdu.RootPathCost}: one link, so most likely cabled straight to it.");
+            }
+            else sender.Detail = Join(sender.Detail, $"Spanning-tree cost to the root ({root.Name}): {bpdu.RootPathCost}.");
         }
 
         // ---- routers --------------------------------------------------------------------------------------------

@@ -413,13 +413,13 @@ public sealed class LldpListener
         using var pcap = LibPcapLiveDeviceList.New().FirstOrDefault(d => d.Name == name)
             ?? throw new InvalidOperationException("The adapter is not there any more. Press Refresh.");
         pcap.Open(new DeviceConfiguration { Mode = DeviceModes.Promiscuous, ReadTimeout = 100, Immediate = true });
-        pcap.Filter = "ether proto 0x88cc or (vlan and ether proto 0x88cc)";
+        pcap.Filter = L2Hello.Filter;
         byte[] own = adapter.MacAddress.GetAddressBytes();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         while (clock.Elapsed < duration && !ct.IsCancellationRequested)
         {
             if (pcap.GetNextPacket(out PacketCapture capture) != GetPacketStatus.PacketRead) continue;
-            if (Lldp.Read(capture.Data) is { } neighbor && !neighbor.SourceMac.AsSpan().SequenceEqual(own))
+            if (L2Hello.Read(capture.Data) is { } neighbor && !neighbor.SourceMac.AsSpan().SequenceEqual(own))
                 Heard?.Invoke(neighbor);
         }
     }, ct);

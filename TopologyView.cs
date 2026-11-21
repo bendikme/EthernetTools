@@ -220,7 +220,7 @@ internal sealed class TopologyView : Control
         g.DrawString(text, font, brush, rect, format);
     }
 
-    private static (Color Fill, Color Border, string Tag) Style(TopoKind kind) => kind switch
+    internal static (Color Fill, Color Border, string Tag) Style(TopoKind kind) => kind switch
     {
         TopoKind.ThisPc => (Color.FromArgb(226, 246, 233), Color.FromArgb(30, 140, 80), "THIS PC"),
         TopoKind.Switch => (Color.FromArgb(225, 236, 255), Color.FromArgb(45, 105, 205), "SWITCH"),
@@ -236,6 +236,12 @@ internal sealed class TopologyView : Control
         var n = p.Node;
         var (fill, border, tag) = Style(n.Kind);
         if (n.Guessed) tag += "?";
+        if (n.StpRoot) tag = "STP ROOT · " + tag;
+        if (n.Change is { } change)
+        {
+            tag = change + " · " + tag;
+            border = change == "NEW" ? Color.FromArgb(0, 150, 70) : Color.FromArgb(200, 60, 40);
+        }
         var r = p.Box;
         using var fillBrush = new SolidBrush(fill);
         using var pen = new Pen(hover ? Color.FromArgb(0, 120, 215) : border, hover ? 2.4f : 1.3f);
@@ -284,8 +290,8 @@ internal sealed class TopologyView : Control
     {
         var items = new (string Text, Pen Pen)[]
         {
-            ("cable, both ends from LLDP", new Pen(Color.FromArgb(70, 80, 95), 1.6f)),
-            ("placed by a switch's MAC table", new Pen(Color.FromArgb(120, 130, 145), 1.3f) { DashStyle = DashStyle.Dot }),
+            ("cable reported by LLDP or CDP", new Pen(Color.FromArgb(70, 80, 95), 1.6f)),
+            ("placed by a MAC table, or probable (spanning tree)", new Pen(Color.FromArgb(120, 130, 145), 1.3f) { DashStyle = DashStyle.Dot }),
             ("closes a ring / second path", new Pen(Color.FromArgb(220, 120, 0), 1.6f) { DashStyle = DashStyle.Dash }),
         };
         int y = Height - 12 - items.Length * 16;

@@ -39,7 +39,14 @@ internal sealed class TopologyForm : Form
     private const int ListenSeconds = 35;
 
     private readonly TopologyView view;
-    private readonly ToolStripButton btnDiscover, btnFit, btnExport, btnV3;
+    private readonly ToolStripButton btnDiscover, btnFit, btnV3;
+    private readonly ToolStripDropDownButton btnMap;
+    /// <summary>Maps saved on other PCs, merged into this one (their ports).</summary>
+    private readonly List<(TopologySnapshot Map, string File)> _merged = new();
+    /// <summary>A saved map this one is compared with (new and moved boxes badged).</summary>
+    private TopologySnapshot? _baseline;
+    private SnapshotDiff? _diff;
+    private int _mergedCables;
     private readonly ToolStripTextBox txtCommunity;
     private readonly ToolStripStatusLabel lblStatus, lblWarn;
 
@@ -69,11 +76,20 @@ internal sealed class TopologyForm : Form
         btnFit = new ToolStripButton("Fit") { ToolTipText = "Fit the map to the window (F)" };
         var btnIn = new ToolStripButton("+") { ToolTipText = "Zoom in (+, or the mouse wheel)" };
         var btnOut = new ToolStripButton("-") { ToolTipText = "Zoom out (-)" };
-        btnExport = new ToolStripButton("Export PNG...") { ToolTipText = "Save the whole map as a picture" };
+        btnMap = new ToolStripDropDownButton("Map") { ToolTipText = "Save, compare, merge and export the map" };
+        btnMap.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            new ToolStripMenuItem("Save map...", null, (_, _) => SaveMap()) { ToolTipText = "Save the map (JSON) to compare with later, or to merge on another PC" },
+            new ToolStripMenuItem("Compare with a saved map...", null, (_, _) => CompareWith()) { ToolTipText = "What is new, gone or moved since a saved map" },
+            new ToolStripMenuItem("Add a map saved on another PC...", null, (_, _) => AddOtherMap()) { ToolTipText = "Add the ports another PC knew (its own above all)" },
+            new ToolStripSeparator(),
+            new ToolStripMenuItem("Export PNG...", null, (_, _) => Export()) { ToolTipText = "Save the whole map as a picture" },
+            new ToolStripMenuItem("Export draw.io...", null, (_, _) => ExportDrawIo()) { ToolTipText = "Save the map as a draw.io diagram (opens in draw.io, and from there in Visio)" },
+        });
         tools.Items.AddRange(new ToolStripItem[]
         {
             btnDiscover, new ToolStripSeparator(), new ToolStripLabel("SNMP community:"), txtCommunity, btnV3, new ToolStripSeparator(),
-            btnFit, btnIn, btnOut, new ToolStripSeparator(), btnExport,
+            btnFit, btnIn, btnOut, new ToolStripSeparator(), btnMap,
             new ToolStripLabel("Drag to move, wheel to zoom, hover a box for details, double-click to select it in the list")
                 { Alignment = ToolStripItemAlignment.Right, ForeColor = Color.Gray },
         });
@@ -94,7 +110,6 @@ internal sealed class TopologyForm : Form
         btnFit.Click += (_, _) => view.Fit();
         btnIn.Click += (_, _) => view.Zoom(1.25f);
         btnOut.Click += (_, _) => view.Zoom(1 / 1.25f);
-        btnExport.Click += (_, _) => Export();
         btnV3.Click += async (_, _) =>
         {
             using var dialog = new SnmpV3Form(s_v3);
@@ -150,7 +165,7 @@ internal sealed class TopologyForm : Form
                 Rebuild(fit: false);
                 });
             };
-            var listening = listener.RunAsync(_adapter, TimeSpan.FromSeconds(ListenSeconds), ct);
+            var listening = listener.RunAsync(_adapter, TimeSpan.FromSeconds(ListenSeconds), ct); // LLDP, CDP and spanning tree
             _ = listening.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
             var progress = new Progress<string>(s => { if (!IsDisposed) lblStatus.Text = s; });
@@ -243,6 +258,15 @@ internal sealed class TopologyForm : Form
         if (IsDisposed) return;
         var thisPc = new ThisPcInfo(Environment.MachineName, _adapter.MacString(), OwnIPv4()?.ToString(), _adapter.FriendlyName);
         _graph = TopologyBuilder.Build(_mapDevices, thisPc, _heard, _agents, Gateway(), _asked, _answered, _problems, _network);
+        _mergedCables = _merged.Sum(m => TopologyMerge.Apply(_graph, m.Map));
+        if (_baseline is not null)
+        {
+            _diff = SnapshotDiff.Compare(_baseline, TopologySnapshot.From(_graph, Environment.MachineName, _adapter.FriendlyName));
+            var changed = _diff.New.Select(n => (n.Key, "NEW")).Concat(_diff.Moved.Select(m => (m.Device.Key, "MOVED")))
+                .GroupBy(x => x.Key).ToDictionary(g => g.Key, g => g.First().Item2);
+            foreach (var n in _graph.Nodes.Concat(_graph.Nodes.Where(g => g.Kind == TopoKind.Group).SelectMany(g => g.Members)))
+                n.Change = n.Mac is { Length: > 0 } mac && changed.TryGetValue(mac.ToUpperInvariant(), out var c) ? c : null;
+        }
         view.SetLayout(TopologyLayout.Layout(_graph), reset: fit);
         UpdateWarnings();
     }
@@ -309,9 +333,9 @@ internal sealed class TopologyForm : Form
         }
         if (_listened && _heard.Count == 0)
         {
-            shortText.Add($"No LLDP heard on {_adapter.FriendlyName}");
-            longText.Add($"No LLDP was heard on {_adapter.FriendlyName} in {ListenSeconds} s, so This PC's switch port is not known. " +
-                         "The switch port may not send LLDP, or the network card keeps LLDP frames to itself (some Intel X710, XL710 " +
+            shortText.Add($"Nothing heard on {_adapter.FriendlyName}");
+            longText.Add($"No LLDP, CDP or spanning tree was heard on {_adapter.FriendlyName} in {ListenSeconds} s, so This PC's switch port is not known. " +
+                         "The switch port may send none of them (or this PC is behind an unmanaged switch), or the network card keeps LLDP to itself (some Intel X710, XL710 " +
                          "and E810 cards have a firmware LLDP agent that does). This PC is then placed only by the switches' MAC tables.");
         }
         lblWarn.Visible = shortText.Count > 0;
@@ -326,7 +350,7 @@ internal sealed class TopologyForm : Form
         int answered = _agents.Count;
         int bridges = _agents.Count(a => a.Fdb.Count > 0);
         int notLocated = _graph.NotLocated?.Members.Count ?? 0;
-        return $"{answered} of {_asked?.Count ?? 0} address(es) answered SNMP ({bridges} with a MAC table), {_heard.Count} LLDP neighbour(s) heard on " +
+        return $"{answered} of {_asked?.Count ?? 0} address(es) answered SNMP ({bridges} with a MAC table), {_heard.Select(h => h.Chassis).Distinct().Count()} neighbour(s) heard ({string.Join("/", _heard.Select(h => h.Protocol).Distinct())}) on " +
                $"{_adapter.FriendlyName}; {switches} switch(es), {_graph.Links.Count} link(s), {notLocated} device(s) not located.";
     }
 
@@ -335,6 +359,68 @@ internal sealed class TopologyForm : Form
 
     private IPAddress? Gateway() => _adapter.NetworkInterface.GetIPProperties().GatewayAddresses
         .Select(g => g.Address).FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any));
+
+    private const string MapFilter = "EthernetTools maps (*.json)|*.json|All files (*.*)|*.*";
+
+    private void SaveMap()
+    {
+        if (_graph is null) return;
+        using var sfd = new SaveFileDialog { Filter = MapFilter, FileName = $"topology-{Environment.MachineName}-{DateTime.Now:yyyyMMdd-HHmmss}.json" };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(sfd.FileName, TopologySnapshot.From(_graph, Environment.MachineName, _adapter.FriendlyName).ToJson());
+            lblStatus.Text = $"Saved the map to {sfd.FileName}";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
+    private static TopologySnapshot? LoadMap(IWin32Window owner, string file)
+    {
+        try { return TopologySnapshot.FromJson(File.ReadAllText(file)); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(owner, $"{Path.GetFileName(file)}: {ex.Message}", "Not a saved map", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return null;
+        }
+    }
+
+    private void CompareWith()
+    {
+        using var ofd = new OpenFileDialog { Filter = MapFilter, Title = "Compare with a saved map" };
+        if (ofd.ShowDialog(this) != DialogResult.OK || LoadMap(this, ofd.FileName) is not { } map) return;
+        _baseline = map;
+        Rebuild(fit: false);
+        if (_diff is null) return;
+        lblStatus.Text = $"Compared with {Path.GetFileName(ofd.FileName)}: {_diff.New.Count} new, {_diff.Gone.Count} gone, {_diff.Moved.Count} moved.";
+        var report = new ToolOutputForm($"Changes since {Path.GetFileName(ofd.FileName)}");
+        report.Show(this);
+        report.AppendText(_diff.Report(map));
+    }
+
+    private void AddOtherMap()
+    {
+        using var ofd = new OpenFileDialog { Filter = MapFilter, Multiselect = true, Title = "Add maps saved on other PCs" };
+        if (ofd.ShowDialog(this) != DialogResult.OK) return;
+        foreach (string file in ofd.FileNames)
+            if (LoadMap(this, file) is { } map) _merged.Add((map, file));
+        Rebuild(fit: true);
+        lblStatus.Text = $"Added {_merged.Count} map(s) from other PCs ({string.Join(", ", _merged.Select(m => m.Map.Pc).Distinct())}): " +
+                         $"{_mergedCables} cable(s) with their ports added.";
+    }
+
+    private void ExportDrawIo()
+    {
+        if (view.CurrentLayout is not { } layout) return;
+        using var sfd = new SaveFileDialog { Filter = "draw.io diagrams (*.drawio)|*.drawio", FileName = $"topology-{DateTime.Now:yyyyMMdd-HHmmss}.drawio" };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            File.WriteAllText(sfd.FileName, DrawIoExport.Build(layout, $"Topology {_adapter.FriendlyName} {DateTime.Now:yyyy-MM-dd HH:mm}"));
+            lblStatus.Text = $"Saved {sfd.FileName}";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
 
     private void Export()
     {

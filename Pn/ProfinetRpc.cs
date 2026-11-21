@@ -5,6 +5,9 @@ using System.Text;
 
 namespace EthernetTools.Pn;
 
+/// <summary>A Profinet device's I&amp;M0: who made it, what it is (order number), its serial number and revisions.</summary>
+public sealed record Im0(ushort VendorId, string OrderId, string SerialNumber, ushort HardwareRevision, string SoftwareRevision, ushort RevisionCounter);
+
 /// <summary>One port of a Profinet device as its own records tell (PDPortDataReal): its id and who is on the other end.</summary>
 public sealed record PnPort(ushort Subslot, string PortId, IReadOnlyList<PnPeer> Peers);
 
@@ -21,6 +24,7 @@ public static class ProfinetRpc
 {
     public const int UdpPort = 34964;
     public const ushort IndexPdPortDataReal = 0x802A, BlockPdPortDataReal = 0x020F;
+    public const ushort IndexIm0 = 0xAFF0, BlockIm0 = 0x0020;
     public const ushort BlockReadReqHeader = 0x0009, BlockReadResHeader = 0x8009;
     public const ushort OpReadImplicit = 5;
 
@@ -139,6 +143,76 @@ public static class ProfinetRpc
         }
         static int Align4(int at) => (at + 3) & ~3;
         static bool IsPortId(string s) => s.StartsWith("port-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// An I&amp;M0 block (Identification &amp; Maintenance 0): vendor id, order id (20 characters), serial number (16),
+    /// hardware revision, software revision (prefix V/R/P/U/T and three numbers: "V2.9.4"), revision counter.
+    /// </summary>
+    public static Im0? ReadIm0(ReadOnlySpan<byte> block)
+    {
+        if (block.Length < 52 || BinaryPrimitives.ReadUInt16BigEndian(block) != BlockIm0) return null;
+        char prefix = (char)block[46];
+        return new Im0(
+            BinaryPrimitives.ReadUInt16BigEndian(block[6..]),
+            Encoding.ASCII.GetString(block.Slice(8, 20)).TrimEnd('\0', ' '),
+            Encoding.ASCII.GetString(block.Slice(28, 16)).TrimEnd('\0', ' '),
+            BinaryPrimitives.ReadUInt16BigEndian(block[44..]),
+            $"{(char.IsLetter(prefix) ? prefix : 'V')}{block[47]}.{block[48]}.{block[49]}",
+            BinaryPrimitives.ReadUInt16BigEndian(block[50..]));
+    }
+
+    /// <summary>
+    /// A device's I&amp;M0: Read Implicit of 0xAFF0 at slot 0, subslot 1 (the head module), else 0x8000 (the interface).
+    /// Null when it does not answer or refuses.
+    /// </summary>
+    public static async Task<Im0?> ReadIm0Async(IPAddress ip, ushort vendorId, ushort deviceId, TimeSpan timeout, CancellationToken ct, int port = UdpPort)
+    {
+        using var udp = new UdpClient(AddressFamily.InterNetwork);
+        udp.Connect(ip, port);
+        uint sequence = 0;
+        foreach (ushort instance in new ushort[] { 1, 0 })
+        {
+            var obj = ObjectUuid(vendorId, deviceId, instance);
+            bool answered = false;
+            foreach (ushort subslot in new ushort[] { 0x0001, 0x8000 })
+            {
+                var record = await ReadRecordAsync(udp, obj, sequence++, 0, subslot, IndexIm0, timeout, ct).ConfigureAwait(false);
+                if (record is null) break; // no answer: try the other object UUID
+                answered = true;
+                if (ReadIm0(record) is { } im) return im;
+            }
+            if (answered) return null;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// One Read Implicit: the record, an empty array when the device refuses (a PNIO error), null when it does not
+    /// answer (twice). <paramref name="udp"/> is connected to the device.
+    /// </summary>
+    private static async Task<byte[]?> ReadRecordAsync(UdpClient udp, Guid obj, uint sequence, ushort slot, ushort subslot, ushort index,
+        TimeSpan timeout, CancellationToken ct)
+    {
+        var activity = Guid.NewGuid();
+        byte[] request = BuildReadImplicit(obj, activity, sequence, slot, subslot, index);
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            await udp.SendAsync(request, ct).ConfigureAwait(false);
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            wait.CancelAfter(timeout);
+            try
+            {
+                while (true)
+                {
+                    var received = await udp.ReceiveAsync(wait.Token).ConfigureAwait(false);
+                    if (ReadResponse(received.Buffer, activity, out _) is { } record) return record;
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            catch (SocketException) { return null; } // nothing listens on 34964
+        }
+        return null;
     }
 
     /// <summary>"port-001.station" as "port-001".</summary>

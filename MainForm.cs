@@ -145,6 +145,17 @@ public partial class MainForm : Form
             lblStatus.Text = ct.IsCancellationRequested
                 ? $"Stopped. Found {results.Count} device(s)."
                 : $"Done. Found {results.Count} device(s).";
+            // duplicate IP addresses (from the ARP claims) and names of station
+            var problems = Conflicts.Find(results, scanner.IpClaims);
+            foreach (var d in results) d.Problem = problems.GetValueOrDefault(d);
+            if (problems.Count > 0)
+            {
+                int ips = problems.Values.Count(p => p.Contains("IP ")), names = problems.Values.Count(p => p.Contains("name of station"));
+                lblStatus.Text += $"  \u26A0 {problems.Count} device(s) with a problem: " +
+                                  string.Join(", ", new[] { ips > 0 ? $"{ips} with a duplicate IP address" : null, names > 0 ? $"{names} with a duplicate name of station" : null }.OfType<string>()) +
+                                  " (see the Problem column)";
+            }
+            gridDevices.Refresh();
         }
         catch (OperationCanceledException)
         {
@@ -277,7 +288,12 @@ public partial class MainForm : Form
         if (e.RowIndex < 0 || e.RowIndex >= _devices.Count) return;
         var dev = _devices[e.RowIndex];
         var row = gridDevices.Rows[e.RowIndex];
-        if (dev.Sources.HasFlag(DiscoverySource.Profinet))
+        if (dev.Problem is not null)
+        {
+            // A duplicate IP address or name of station: light red.
+            row.DefaultCellStyle.BackColor = Color.FromArgb(255, 226, 226);
+        }
+        else if (dev.Sources.HasFlag(DiscoverySource.Profinet))
         {
             // Light orange tint for Profinet-confirmed devices.
             row.DefaultCellStyle.BackColor = Color.FromArgb(255, 246, 224);
@@ -552,6 +568,50 @@ public partial class MainForm : Form
     private static string FormatRow(NetDevice d) =>
         $"{d.MacString}\t{d.IPAddress}\t{d.DisplayName}\t{d.VendorName}\t{d.SubnetMask}\t{d.Gateway}\t{d.SourcesText}";
 
+    /// <summary>
+    /// Reads I&amp;M0 (order number, serial, hardware and firmware revision) from every Profinet device with an IP
+    /// address, over PNIO RPC (Read Implicit 0xAFF0), sixteen at a time.
+    /// </summary>
+    private async Task OnReadInventoryAsync()
+    {
+        var profinet = _allDevices.Where(d => d.Sources.HasFlag(DiscoverySource.Profinet)
+            && d.IPAddress is { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork } ip && TopologyDiscovery.Askable(ip)).ToList();
+        if (profinet.Count == 0)
+        {
+            MessageBox.Show(this, "Scan first: I&M is read from the Profinet devices the scan finds (with an IP address).", "Read I&M",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        tsbInventory.Enabled = false;
+        lblStatus.Text = $"Reading I&&M0 from {profinet.Count} Profinet device(s)...";
+        int read = 0;
+        try
+        {
+            using var gate = new SemaphoreSlim(16);
+            await Task.WhenAll(profinet.Select(async d =>
+            {
+                await gate.WaitAsync();
+                try
+                {
+                    if (await ProfinetRpc.ReadIm0Async(d.IPAddress!, d.VendorId, d.DeviceId, TimeSpan.FromMilliseconds(700), CancellationToken.None) is { } im)
+                    {
+                        d.OrderNumber = im.OrderId;
+                        d.SerialNumber = im.SerialNumber;
+                        d.HardwareRevision = im.HardwareRevision.ToString();
+                        d.FirmwareVersion = im.SoftwareRevision;
+                        Interlocked.Increment(ref read);
+                    }
+                }
+                catch (Exception) { /* one device's trouble is not the list's */ }
+                finally { gate.Release(); }
+            }));
+            lblStatus.Text = $"I&&M0 read from {read} of {profinet.Count} Profinet device(s)." +
+                             (read < profinet.Count ? " The others did not answer PNIO RPC (a PC station, or another subnet)." : "");
+            gridDevices.Refresh();
+        }
+        finally { tsbInventory.Enabled = true; }
+    }
+
     private void OnExportCsv()
     {
         if (_devices.Count == 0)
@@ -568,7 +628,7 @@ public partial class MainForm : Form
         if (sfd.ShowDialog(this) != DialogResult.OK) return;
 
         var sb = new StringBuilder();
-        sb.AppendLine("MAC,IP,Name,Vendor,SubnetMask,Gateway,Source,RTT_ms,LastSeenUtc");
+        sb.AppendLine("MAC,IP,Name,Vendor,SubnetMask,Gateway,Source,RTT_ms,LastSeenUtc,Problem,OrderNumber,SerialNumber,HardwareRevision,FirmwareVersion");
         foreach (var d in _devices)
         {
             sb.Append(Csv(d.MacString)).Append(',')
@@ -579,7 +639,12 @@ public partial class MainForm : Form
               .Append(Csv(d.Gateway?.ToString())).Append(',')
               .Append(Csv(d.SourcesText)).Append(',')
               .Append(d.RttMs?.ToString() ?? "").Append(',')
-              .Append(d.LastSeenUtc.ToString("o"))
+              .Append(d.LastSeenUtc.ToString("o")).Append(',')
+              .Append(Csv(d.Problem)).Append(',')
+              .Append(Csv(d.OrderNumber)).Append(',')
+              .Append(Csv(d.SerialNumber)).Append(',')
+              .Append(Csv(d.HardwareRevision)).Append(',')
+              .Append(Csv(d.FirmwareVersion))
               .AppendLine();
         }
         try

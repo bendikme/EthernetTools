@@ -43,7 +43,14 @@ public sealed record LldpNeighbor(
     string SystemDescription,
     LldpCapabilities Capabilities,
     IPAddress? ManagementAddress,
-    byte[] SourceMac);
+    byte[] SourceMac)
+{
+    /// <summary>What it was heard as: "LLDP", "CDP" or "STP" (a spanning-tree BPDU).</summary>
+    public string Protocol { get; init; } = "LLDP";
+    /// <summary>STP: the root bridge's MAC the sender reports, and the sender's cost to it.</summary>
+    public byte[]? RootBridge { get; init; }
+    public uint RootPathCost { get; init; }
+}
 
 /// <summary>LLDP (IEEE 802.1AB, EtherType 0x88CC): reading the frames a neighbour sends.</summary>
 public static class Lldp
