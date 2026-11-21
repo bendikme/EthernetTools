@@ -18,8 +18,13 @@ public sealed class SnmpAgentData
     public LldpId? LocalChassis { get; init; }
     /// <summary>LLDP local ports: lldpLocPortNum -> the port's name.</summary>
     public Dictionary<int, string> LocalPorts { get; } = new();
-    /// <summary>LLDP neighbours, by the local port they were heard on.</summary>
+    /// <summary>
+    /// LLDP neighbours, by the local port they were heard on (lldpLocPortNum); CDP neighbours (CISCO-CDP-MIB) by
+    /// the negative of their ifIndex - <see cref="PortName"/> knows both.
+    /// </summary>
     public List<(int LocalPort, LldpNeighbor Neighbor)> Neighbors { get; } = new();
+    /// <summary>ifIndex -> ifName, where read (for bridge ports and CDP's local ports).</summary>
+    public Dictionary<int, string> IfNames { get; } = new();
     /// <summary>The MAC table (BRIDGE-MIB): MAC (AA:BB:..) -> bridge port.</summary>
     public Dictionary<string, int> Fdb { get; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Bridge port -> the port's name (ifName through dot1dBasePortIfIndex), where known.</summary>
@@ -35,6 +40,7 @@ public sealed class SnmpAgentData
     /// gives way to the interface's name.</summary>
     public string PortName(int port)
     {
+        if (port < 0) return IfNames.TryGetValue(-port, out var cdpPort) && cdpPort.Length > 0 ? cdpPort : $"ifIndex {-port}";
         bool hasLldp = LocalPorts.TryGetValue(port, out var lldp) && lldp.Length > 0;
         bool hasIf = BridgePortNames.TryGetValue(port, out var ifName) && ifName.Length > 0;
         if (hasLldp && !(hasIf && LooksLikeMac(lldp!))) return lldp!;
@@ -77,6 +83,9 @@ public static class TopologyDiscovery
     public const string Dot1dTpFdbPort = "1.3.6.1.2.1.17.4.3.1.2";     // . mac(6)
     public const string Dot1qTpFdbPort = "1.3.6.1.2.1.17.7.1.2.2.1.2"; // . fdbId . mac(6)
     public const string IfName = "1.3.6.1.2.1.31.1.1.1.1";
+    /// <summary>CISCO-CDP-MIB cdpCacheEntry: .3 address type, .4 address, .6 device id, .7 device port, .8 platform,
+    /// .9 capabilities; indexed by ifIndex . device index.</summary>
+    public const string CdpCacheTable = "1.3.6.1.4.1.9.9.23.1.2.1.1";
 
     /// <summary>
     /// Ask every address (64 at a time); the agents that answer, with what they told. <paramref name="progress"/>
@@ -190,6 +199,10 @@ public static class TopologyDiscovery
             ReadNeighbors(agent,
                 await client.WalkAsync(LldpRemTable, ct, 6000).ConfigureAwait(false),
                 await client.WalkAsync(LldpRemManAddrIfSubtype, ct, 2000).ConfigureAwait(false));
+            // Cisco's own neighbour table (a Cisco with CDP but no LLDP-MIB still tells its cables)
+            ReadCdpNeighbors(agent, await client.WalkAsync(CdpCacheTable, ct, 3000).ConfigureAwait(false));
+            if (agent.Neighbors.Any(n => n.LocalPort < 0) && agent.IfNames.Count == 0)
+                ReadIfNames(agent, await client.WalkAsync(IfName, ct, 2000).ConfigureAwait(false));
             if (agent.IsBridge)
             {
                 var fdb = await client.WalkAsync(Dot1dTpFdbPort, ct, 16000).ConfigureAwait(false);
@@ -376,11 +389,52 @@ public static class TopologyDiscovery
         }
     }
 
+    public static void ReadIfNames(SnmpAgentData agent, List<SnmpVarBind>? ifNames)
+    {
+        foreach (var row in ifNames ?? [])
+            if (Index(row.Oid, IfName) is { Length: 1 } ix) agent.IfNames[(int)ix[0]] = row.Value.AsText();
+    }
+
+    /// <summary>
+    /// CISCO-CDP-MIB cdpCacheTable rows as neighbours, on the negative of their local ifIndex (see
+    /// <see cref="SnmpAgentData.Neighbors"/>): the device id (a MAC when it is one), its port, platform, capabilities
+    /// and IPv4 address.
+    /// </summary>
+    public static void ReadCdpNeighbors(SnmpAgentData agent, List<SnmpVarBind>? rows)
+    {
+        var fields = new SortedDictionary<(int IfIndex, int Device), Dictionary<uint, SnmpValue>>();
+        foreach (var row in rows ?? [])
+        {
+            if (Index(row.Oid, CdpCacheTable) is not { Length: 3 } ix) continue; // column . ifIndex . device index
+            var key = ((int)ix[1], (int)ix[2]);
+            if (!fields.TryGetValue(key, out var f)) fields[key] = f = new Dictionary<uint, SnmpValue>();
+            f[ix[0]] = row.Value;
+        }
+        foreach (var ((ifIndex, _), f) in fields)
+        {
+            string Text(uint column) => f.TryGetValue(column, out var v) && !v.IsMissing ? v.AsText() : "";
+            string device = Text(6), port = Text(7);
+            if (device.Length == 0 || port.Length == 0) continue;
+            // the device id: a MAC as six raw bytes (ArubaOS fills the table so for neighbours it knows by LLDP), a MAC
+            // as text (Cisco small business: 04eb40e0c222, IOS: 04eb.40e0.c222), or a name
+            byte[] raw = f[6].AsBytes();
+            string hex = device.Replace(":", "").Replace("-", "").Replace(".", "");
+            var chassis = raw.Length == 6 && raw.Any(b => b is < 0x20 or > 0x7E) ? new LldpId(4, raw)
+                : hex.Length == 12 && hex.All(Uri.IsHexDigit) ? new LldpId(4, Convert.FromHexString(hex))
+                : new LldpId(7, System.Text.Encoding.ASCII.GetBytes(device));
+            uint caps = f.TryGetValue(9, out var c) && c.AsBytes().Length == 4 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(c.AsBytes()) : 0;
+            var capabilities = ((caps & 0x0A) != 0 ? LldpCapabilities.Bridge : 0) | ((caps & 0x01) != 0 ? LldpCapabilities.Router : 0);
+            IPAddress? address = f.TryGetValue(4, out var a) && a.AsBytes().Length == 4 && (!f.TryGetValue(3, out var t) || t.AsInteger() == 1)
+                ? new IPAddress(a.AsBytes()) : null;
+            agent.Neighbors.Add((-ifIndex, new LldpNeighbor(chassis, new LldpId(5, System.Text.Encoding.ASCII.GetBytes(port)), "",
+                chassis.IsChassisMac ? "" : device, Text(8), capabilities, address, []) { Protocol = "CDP" }));
+        }
+    }
+
     public static void ReadBridgePortNames(SnmpAgentData agent, List<SnmpVarBind>? basePortIfIndex, List<SnmpVarBind>? ifNames)
     {
-        var names = new Dictionary<int, string>();
-        foreach (var row in ifNames ?? [])
-            if (Index(row.Oid, IfName) is { Length: 1 } ix) names[(int)ix[0]] = row.Value.AsText();
+        ReadIfNames(agent, ifNames);
+        var names = agent.IfNames;
         foreach (var row in basePortIfIndex ?? [])
             if (Index(row.Oid, Dot1dBasePortIfIndex) is { Length: 1 } ix && names.TryGetValue((int)row.Value.AsInteger(), out var name))
                 agent.BridgePortNames[(int)ix[0]] = name;

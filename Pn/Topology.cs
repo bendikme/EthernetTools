@@ -251,14 +251,17 @@ public static class TopologyBuilder
         }
 
         foreach (var (agent, node) in agentNode)
-            foreach (var (localPort, neighbor) in agent.Neighbors)
+            foreach (var (localPort, neighbor) in agent.Neighbors.OrderBy(n => L2Hello.Rank(n.Neighbor)))
             {
                 var other = Resolve(neighbor);
+                // a cable LLDP already gave (both ends may name their ports differently in CDP): once
+                if (neighbor.Protocol == "CDP" && graph.Links.Any(l => (ReferenceEquals(l.A, node) && ReferenceEquals(l.B, other))
+                                                                      || (ReferenceEquals(l.A, other) && ReferenceEquals(l.B, node)))) continue;
                 Learn(other, neighbor);
                 if (other.Kind == TopoKind.Host && neighbor.Capabilities.HasFlag(LldpCapabilities.Bridge)
                     && !neighbor.Capabilities.HasFlag(LldpCapabilities.Station) && other.Device?.Sources.HasFlag(DiscoverySource.Profinet) != true)
                     other.Kind = TopoKind.Switch;
-                Link(node, agent.PortName(localPort), other, TopologyDiscovery.PortName(neighbor.Port, neighbor.PortDescription), "LLDP", ownA: true);
+                Link(node, agent.PortName(localPort), other, TopologyDiscovery.PortName(neighbor.Port, neighbor.PortDescription), neighbor.Protocol, ownA: true);
             }
         // what the adapter heard: LLDP first (the best port names), then CDP, then spanning tree
         foreach (var neighbor in heardOnAdapter.OrderBy(L2Hello.Rank))
@@ -310,7 +313,7 @@ public static class TopologyBuilder
         {
             string name = agent.PortName(port);
             var node = agentNode[agent];
-            var link = graph.Links.FirstOrDefault(l => l.Source.StartsWith("LLDP")
+            var link = graph.Links.FirstOrDefault(l => (l.Source.StartsWith("LLDP") || l.Source.StartsWith("CDP"))
                 && ((ReferenceEquals(l.A, node) && l.PortA == name) || (ReferenceEquals(l.B, node) && l.PortB == name)));
             return link is null ? null : ReferenceEquals(link.A, node) ? link.B : link.A;
         }

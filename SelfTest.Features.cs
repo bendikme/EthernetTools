@@ -164,6 +164,52 @@ internal static partial class SelfTest
             && here.Links.Any(l => l.A.Name == "sw" && l.PortA == "9" && l.B == d5) && !here.Nodes.Contains(unknownPort) && here.Nodes.Contains(d5));
         Check("merging the same map again adds nothing", TopologyMerge.Apply(here, theirs) == 0);
 
+        // ---- CDP over SNMP (CISCO-CDP-MIB), and the switch tables ---------------------------------------------------
+        Section("cdp-mib and tables");
+        const string cdp1 = TopologyDiscovery.CdpCacheTable;
+        var coreAgent = new SnmpAgentData { Ip = IPAddress.Parse("10.0.0.1"), LocalChassis = ChassisMac(1), Services = 2, SysName = "core" };
+        TopologyDiscovery.ReadCdpNeighbors(coreAgent,
+        [
+            Int($"{cdp1}.3.10049.1", 1), Str($"{cdp1}.4.10049.1", [10, 0, 0, 6]), Str($"{cdp1}.6.10049.1", "edge-sw"),
+            Str($"{cdp1}.7.10049.1", "GigabitEthernet0/1"), Str($"{cdp1}.8.10049.1", "cisco WS-C2960"), Str($"{cdp1}.9.10049.1", [0, 0, 0, 0x28]),
+            Str($"{cdp1}.6.10050.3", "02aa.0000.0007"), Str($"{cdp1}.7.10050.3", "gi1/0/2"), Str($"{cdp1}.9.10050.3", [0, 0, 0, 0x01]),
+            // as the office's Aruba fills it for a neighbour it knows by LLDP: the device id as six raw MAC bytes
+            Str($"{cdp1}.6.15.1", M(8).GetAddressBytes()), Str($"{cdp1}.7.15.1", "1"), Str($"{cdp1}.9.15.1", [0, 0, 0, 0x08]),
+        ]);
+        TopologyDiscovery.ReadIfNames(coreAgent, [Str($"{TopologyDiscovery.IfName}.10049", "Gi1/0/49"), Str($"{TopologyDiscovery.IfName}.10050", "Gi1/0/50")]);
+        LldpNeighbor CdpOn(int ifIndex) => coreAgent.Neighbors.Single(n => n.LocalPort == -ifIndex).Neighbor;
+        var e1 = CdpOn(10049);
+        Check("cdpCacheTable: device id, port, platform, switch capability, address; a device id as a Cisco-dotted MAC or six raw bytes is the chassis MAC; local port by ifName",
+            coreAgent.Neighbors.Count == 3 && e1 is { Protocol: "CDP", SystemName: "edge-sw", SystemDescription: "cisco WS-C2960" }
+            && e1.Port.PortText == "GigabitEthernet0/1" && e1.Capabilities.HasFlag(LldpCapabilities.Bridge) && Equals(e1.ManagementAddress, IPAddress.Parse("10.0.0.6"))
+            && CdpOn(10050).Chassis.ChassisText == Ms(7) && CdpOn(10050).Capabilities.HasFlag(LldpCapabilities.Router)
+            && CdpOn(15).Chassis.ChassisText == Ms(8) && CdpOn(15).SystemName == ""
+            && coreAgent.PortName(-10049) == "Gi1/0/49" && coreAgent.PortName(-99) == "ifIndex 99");
+        var cdpMap = TopologyBuilder.Build([Dev(1, "core"), Dev(6, "edge-sw"), Dev(7, "rtr")], pc, [], [coreAgent], null);
+        Check("on the map: a cable from CDP, each end's port (Gi1/0/49 - GigabitEthernet0/1)",
+            cdpMap.Links.Any(l => l.Source == "CDP" && l.A.Name == "core" && l.PortA == "Gi1/0/49" && l.B.Name == "edge-sw" && l.PortB == "GigabitEthernet0/1"));
+        coreAgent.Neighbors.Insert(0, (49, Nb(new LldpId(7, Encoding.ASCII.GetBytes("edge-sw")), IfName("gi0/1"), "edge-sw", LldpCapabilities.Bridge)));
+        var both = TopologyBuilder.Build([Dev(1, "core"), Dev(6, "edge-sw"), Dev(7, "rtr")], pc, [], [coreAgent], null);
+        Check("the same cable from LLDP and CDP: one cable, LLDP's", both.Links.Count(l => (l.A.Name, l.B.Name) is ("core", "edge-sw") or ("edge-sw", "core")) == 1
+            && both.Links.Single(l => l.B.Name == "edge-sw").Source == "LLDP");
+
+        coreAgent.Fdb[Ms(21)] = 5; coreAgent.Fdb[Ms(22)] = 6; coreAgent.Fdb[Ms(23)] = 6;
+        using (var tables = new SwitchTablesForm([coreAgent], [stp!, cdp!], [Dev(21, "h1"), Dev(22, "h2")], coreAgent))
+        {
+            var t = tables.TablesFor(coreAgent);
+            var mac = t[0];
+            Check("switch tables: the MAC table (3 rows, MACs per port, the device each is), LLDP (1) and CDP (3) neighbours",
+                mac.Rows.Count == 3 && t[1].Rows.Count == 1 && t[2].Rows.Count == 3
+                && mac.Rows.Cast<System.Data.DataRow>().Any(r => (string)r["MAC"] == Ms(22) && (int)r["MACs on port"] == 2 && (string)r["Device"] == "h2")
+                && t[2].Rows.Cast<System.Data.DataRow>().Any(r => (string)r["Local port"] == "Gi1/0/49"));
+            var heardTable = SwitchTablesForm.HeardTable([stp!, cdp!]);
+            Check("what This PC heard: CDP before spanning tree, the root bridge and cost shown",
+                heardTable.Rows.Count == 2 && (string)heardTable.Rows[0]["Protocol"] == "CDP" && (string)heardTable.Rows[1]["Root path cost"] == "20000");
+            string csvText = SwitchTablesForm.TableText(t[2], ',');
+            Check("a table as CSV: the header, then one line per row, quoted where needed",
+                csvText.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 4 && csvText.StartsWith("Local port,Chassis,Port"));
+        }
+
         // ---- draw.io ----------------------------------------------------------------------------------------------
         Section("draw.io");
         var layout = TopologyLayout.Layout(TopologyBuilder.Build(devices, pc, [stp!, cdp!], [], null));

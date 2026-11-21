@@ -83,6 +83,8 @@ internal sealed class TopologyForm : Form
             new ToolStripMenuItem("Compare with a saved map...", null, (_, _) => CompareWith()) { ToolTipText = "What is new, gone or moved since a saved map" },
             new ToolStripMenuItem("Add a map saved on another PC...", null, (_, _) => AddOtherMap()) { ToolTipText = "Add the ports another PC knew (its own above all)" },
             new ToolStripSeparator(),
+            new ToolStripMenuItem("Switch tables...", null, (_, _) => ShowTables(null)) { ToolTipText = "The MAC, LLDP and CDP tables the map was built from, and what This PC heard (also: double-click a switch)" },
+            new ToolStripSeparator(),
             new ToolStripMenuItem("Export PNG...", null, (_, _) => Export()) { ToolTipText = "Save the whole map as a picture" },
             new ToolStripMenuItem("Export draw.io...", null, (_, _) => ExportDrawIo()) { ToolTipText = "Save the map as a draw.io diagram (opens in draw.io, and from there in Visio)" },
         });
@@ -118,7 +120,12 @@ internal sealed class TopologyForm : Form
             btnV3.Text = V3Text();
             await DiscoverAsync();
         };
-        view.NodeActivated += n => { if (n.Device is { } d) _select?.Invoke(d); };
+        // double-click: a box that told its tables (SNMP, Profinet records) opens them; any other selects it in the list
+        view.NodeActivated += n =>
+        {
+            if (n.Managed && AgentOf(n) is { } agent) ShowTables(agent);
+            else if (n.Device is { } d) _select?.Invoke(d);
+        };
         KeyDown += (_, e) =>
         {
             if (txtCommunity.Focused) return;
@@ -359,6 +366,17 @@ internal sealed class TopologyForm : Form
 
     private IPAddress? Gateway() => _adapter.NetworkInterface.GetIPProperties().GatewayAddresses
         .Select(g => g.Address).FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any));
+
+    /// <summary>The agent a box is: by its address, else by its chassis MAC.</summary>
+    private SnmpAgentData? AgentOf(TopoNode n) =>
+        _agents.FirstOrDefault(a => a.Ip.ToString() == n.Ip)
+        ?? _agents.FirstOrDefault(a => n.Mac is { } mac && a.LocalChassis is { IsChassisMac: true } c && string.Equals(c.ChassisText, mac, StringComparison.OrdinalIgnoreCase));
+
+    private void ShowTables(SnmpAgentData? select)
+    {
+        var tables = new SwitchTablesForm(_agents, _heard.GroupBy(h => (h.Chassis, h.Port)).Select(g => g.Last()).ToList(), _mapDevices, select);
+        tables.Show(this);
+    }
 
     private const string MapFilter = "EthernetTools maps (*.json)|*.json|All files (*.*)|*.*";
 

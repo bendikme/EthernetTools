@@ -103,6 +103,7 @@ Traceroute sees only routers, never switches or ports. So, as in PRONETA or TIA 
 | ------ | ------------- |
 | **LLDP, CDP and spanning tree heard on the adapter** | the switch and port This PC is plugged into (LLDP every 5-30 s, CDP every 60 s, spanning-tree BPDUs every 2 s; the window listens for 35 s). A BPDU also names the root bridge, and the cost to it: a switch one link's cost from the root is drawn as probably cabled straight to it. A network card that keeps LLDP to itself (Intel X710 ...) still passes CDP and BPDUs. |
 | **SNMP, LLDP-MIB** | each device's neighbour on each of its ports (Profinet devices and managed switches carry it) |
+| **SNMP, CISCO-CDP-MIB** | the same from a switch's CDP neighbour table (Cisco, and ArubaOS switches too): cables where LLDP is off |
 | **SNMP, BRIDGE-MIB** | a switch's MAC address table: places the devices that don't speak LLDP (PCs, printers) on their port |
 | **Profinet records** | a Profinet device that doesn't answer SNMP: each port's neighbour from its own PDPortDataReal record (as PRONETA reads it) |
 | **The default gateway** | shown as a router |
@@ -150,6 +151,9 @@ Reading the map:
 - **Save map...** saves the map as a `.json` file: every box and cable, who took it, when.
 - **Compare with a saved map...** says what is **new**, **gone** or **moved** (behind another switch, or on
   another port) since then, in a report window; new and moved boxes are badged on the map.
+- **Switch tables...** shows the raw tables the map was built from: each switch's MAC table (with the device each
+  MAC is and how many MACs share its port), its LLDP and CDP neighbours, and what This PC heard on its adapter. Copy
+  or export each as CSV. Double-clicking a switch that answered SNMP opens its tables too.
 - **Add a map saved on another PC...** adds what that PC knew: its own switch port (from LLDP, CDP or spanning
   tree) and any port its switches told. A device this map had only as "port not known" moves onto that port.
   A few PCs at different desks fill in ports no switch tells.
@@ -256,6 +260,7 @@ The version is in `EthernetTools.csproj` only (`<Version>`, `year.month.patch`);
 | `Pn/TopologySnapshot.cs` | saved maps: save, compare (new, gone, moved), merge another PC's map |
 | `DrawIoExport.cs` | the map as a draw.io diagram |
 | `SnmpV3Form.cs` | the SNMPv3 user dialog of the topology window |
+| `SwitchTablesForm.cs` | the raw MAC, LLDP and CDP tables behind the map |
 | `Pn/TopologyDiscovery.cs` | reads LLDP-MIB and BRIDGE-MIB from the devices, following LLDP to switches the scan missed; listens for LLDP on the adapter |
 | `Pn/Topology.cs`, `Pn/TopologyLayout.cs` | builds the map from what was found; lays it out as a tree |
 | `Pn/ArpProtocol.cs`, `Pn/NameResolver.cs` | ARP frames; NetBIOS and reverse-DNS names |
