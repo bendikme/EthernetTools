@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text;
 using EthernetTools.Pn;
 
@@ -53,6 +54,120 @@ internal static partial class SelfTest
         bool refused;
         try { Ber.ReadResponse([0x30, 0x05, 0x02, 0x01]); refused = false; } catch (FormatException) { refused = true; }
         Check("a truncated message is refused, not misread", refused);
+    }
+
+    // ---- SNMP walks against a fake agent on loopback ---------------------------------------------------------------
+
+    /// <summary>
+    /// A small SNMP agent on 127.0.0.1 serving one table, for the walk's fallbacks: <c>bulk</c> says, for a GETBULK's
+    /// max-repetitions, which error status to answer with (0: serve it) or null to stay silent.
+    /// </summary>
+    private sealed class FakeAgent : IDisposable
+    {
+        private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
+        private readonly CancellationTokenSource _stop = new();
+        private readonly List<SnmpVarBind> _rows;
+        private readonly Func<int, int?> _bulk;
+        public int BulkRequests, NextRequests;
+        public int Port => ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
+
+        public FakeAgent(IEnumerable<SnmpVarBind> rows, Func<int, int?> bulk)
+        {
+            _rows = rows.OrderBy(r => r.Oid, Comparer<string>.Create(SnmpClient.CompareOid)).ToList();
+            _bulk = bulk;
+            _ = Task.Run(ServeAsync);
+        }
+
+        private async Task ServeAsync()
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                UdpReceiveResult received;
+                try { received = await _udp.ReceiveAsync(_stop.Token); }
+                catch (Exception) { return; }
+                byte[]? answer = Answer(received.Buffer);
+                if (answer is not null) await _udp.SendAsync(answer, received.RemoteEndPoint);
+            }
+        }
+
+        private byte[]? Answer(byte[] request)
+        {
+            int at = 0;
+            var (_, message) = Ber.Read(request, ref at);
+            int m = 0;
+            long version = Ber.ReadInteger(Ber.Read(message, ref m).Content);
+            string community = Encoding.ASCII.GetString(Ber.Read(message, ref m).Content);
+            var (pdu, body) = Ber.Read(message, ref m);
+            int p = 0;
+            long id = Ber.ReadInteger(Ber.Read(body, ref p).Content);
+            Ber.Read(body, ref p);
+            long repetitions = Ber.ReadInteger(Ber.Read(body, ref p).Content);
+            var (_, list) = Ber.Read(body, ref p);
+            int l = 0;
+            var (_, vb) = Ber.Read(list, ref l);
+            int v = 0;
+            string oid = Ber.ReadOid(Ber.Read(vb, ref v).Content);
+
+            int error = 0;
+            var found = new List<SnmpVarBind>();
+            var after = _rows.Where(r => SnmpClient.CompareOid(r.Oid, oid) > 0);
+            if (pdu == Ber.PduGetBulk)
+            {
+                Interlocked.Increment(ref BulkRequests);
+                if (_bulk((int)repetitions) is not { } status) return null; // silent
+                error = status;
+                if (error == 0)
+                {
+                    found.AddRange(after.Take((int)repetitions));
+                    while (found.Count < repetitions) found.Add(new SnmpVarBind(oid, new SnmpValue(SnmpValue.TagEndOfMibView, [])));
+                }
+            }
+            else
+            {
+                Interlocked.Increment(ref NextRequests);
+                if (after.FirstOrDefault() is { } row) found.Add(row);
+                else if (version == 0) error = 2; // v1: noSuchName - the end
+                else found.Add(new SnmpVarBind(oid, new SnmpValue(SnmpValue.TagEndOfMibView, [])));
+            }
+            if (error != 0) found = [new SnmpVarBind(oid, new SnmpValue(SnmpValue.TagNull, []))];
+            byte[][] binds = found.Select(f => Ber.Sequence(0x30, Ber.Oid(f.Oid), Ber.Tlv(f.Value.Tag, f.Value.Data))).ToArray();
+            return Ber.Sequence(0x30, Ber.Integer(version), Ber.OctetString(community),
+                Ber.Sequence(Ber.PduResponse, Ber.Integer(id), Ber.Integer(error), Ber.Integer(0), Ber.Sequence(0x30, binds)));
+        }
+
+        public void Dispose() { _stop.Cancel(); _udp.Dispose(); }
+    }
+
+    private static void SnmpWalks()
+    {
+        Section("snmp walks");
+        const string root = TopologyDiscovery.Dot1dTpFdbPort;
+        var table = Enumerable.Range(1, 30).Select(i => Int($"{root}.0.1.2.3.4.{i}", i % 8 + 1))
+            .Append(Int("1.3.6.1.2.1.17.4.3.1.3.0.1.2.3.4.1", 3)) // the next column: not part of the walk
+            .ToList();
+        bool All(List<SnmpVarBind>? rows) => rows is { Count: 30 } && rows.All(r => r.Oid.StartsWith(root + ".", StringComparison.Ordinal))
+            && rows.Select(r => r.Oid).Distinct().Count() == 30;
+        (List<SnmpVarBind>? Rows, FakeAgent Agent) Walk(SnmpVersion version, Func<int, int?> bulk)
+        {
+            var agent = new FakeAgent(table, bulk);
+            var client = new SnmpClient(IPAddress.Loopback, "public", version, TimeSpan.FromMilliseconds(300), retries: 0, port: agent.Port);
+            var rows = Task.Run(() => client.WalkAsync(root, CancellationToken.None, 1000)).GetAwaiter().GetResult();
+            agent.Dispose();
+            return (rows, agent);
+        }
+
+        var (ok, okAgent) = Walk(SnmpVersion.V2c, _ => 0);
+        Check("v2c: a walk with GETBULK reads the whole column and stops at the next", All(ok) && okAgent.NextRequests == 0);
+        var (small, smallAgent) = Walk(SnmpVersion.V2c, r => r > SnmpClient.SmallBulkRepetitions ? 5 : 0);
+        Check("v2c: an agent that answers a big GETBULK with genErr is walked with fewer repetitions",
+            All(small) && smallAgent.NextRequests == 0);
+        var (tooBig, tooBigAgent) = Walk(SnmpVersion.V2c, _ => 1);
+        Check("v2c: an agent that answers every GETBULK with tooBig is walked with GETNEXT",
+            All(tooBig) && tooBigAgent.BulkRequests == 2 && tooBigAgent.NextRequests > 0);
+        var (silent, silentAgent) = Walk(SnmpVersion.V2c, _ => null);
+        Check("v2c: an agent that ignores GETBULK is walked with GETNEXT", All(silent) && silentAgent.NextRequests > 0);
+        var (v1, v1Agent) = Walk(SnmpVersion.V1, _ => 0);
+        Check("v1: a walk with GETNEXT, ended by noSuchName", All(v1) && v1Agent.BulkRequests == 0);
     }
 
     // ---- LLDP frames ----------------------------------------------------------------------------------------------

@@ -213,15 +213,21 @@ public sealed class SnmpClient
     private readonly string _community;
     private readonly TimeSpan _timeout;
     private readonly int _retries;
+    private readonly int _port;
     private static int _requestId = Random.Shared.Next(1, int.MaxValue / 2);
 
-    public SnmpClient(IPAddress host, string community, SnmpVersion version, TimeSpan timeout, int retries = 1)
+    /// <summary>GETBULK's max-repetitions, then what a walk falls back to when an agent fails it.</summary>
+    public const int BulkRepetitions = 24, SmallBulkRepetitions = 4;
+
+    /// <param name="port">UDP port of the agent (161; the self-test's fake agent listens elsewhere).</param>
+    public SnmpClient(IPAddress host, string community, SnmpVersion version, TimeSpan timeout, int retries = 1, int port = 161)
     {
         _host = host;
         _community = community;
         Version = version;
         _timeout = timeout;
         _retries = retries;
+        _port = port;
     }
 
     public SnmpVersion Version { get; }
@@ -253,18 +259,28 @@ public sealed class SnmpClient
     /// <summary>
     /// Every object under <paramref name="root"/>, in order (at most <paramref name="maxRows"/>). Null when the agent
     /// stops answering before the walk is done.
+    /// <para>v2c walks with GETBULK. Small embedded agents (Profinet devices, small switches) may answer GETBULK with
+    /// tooBig or genErr instead of trimming the answer, or not at all: the walk then goes on from where it is with
+    /// fewer repetitions, and then with GETNEXT, before it gives up.</para>
     /// </summary>
     public async Task<List<SnmpVarBind>?> WalkAsync(string root, CancellationToken ct, int maxRows = 5000)
     {
         string prefix = root.TrimStart('.') + ".";
         var rows = new List<SnmpVarBind>();
         string next = root.TrimStart('.');
+        int repetitions = Version == SnmpVersion.V2c ? BulkRepetitions : 0; // 0: GETNEXT
         while (rows.Count < maxRows)
         {
             ct.ThrowIfCancellationRequested();
-            var response = Version == SnmpVersion.V2c
-                ? await RequestAsync(Ber.PduGetBulk, [next], 0, 24, ct).ConfigureAwait(false)
+            var response = repetitions > 0
+                ? await RequestAsync(Ber.PduGetBulk, [next], 0, repetitions, ct).ConfigureAwait(false)
                 : await RequestAsync(Ber.PduGetNext, [next], 0, 0, ct).ConfigureAwait(false);
+            if (repetitions > 0 && (response is null || response.ErrorStatus != 0))
+            {
+                // the agent failed GETBULK: fewer repetitions, then GETNEXT, from the same place
+                repetitions = repetitions > SmallBulkRepetitions ? SmallBulkRepetitions : 0;
+                continue;
+            }
             if (response is null) return rows.Count > 0 ? rows : null;
             if (response.ErrorStatus != 0 || response.VarBinds.Count == 0) return rows; // v1: noSuchName = the end
             foreach (var vb in response.VarBinds)
@@ -284,7 +300,7 @@ public sealed class SnmpClient
         int id = Interlocked.Increment(ref _requestId) & 0x7FFFFFFF;
         byte[] request = Ber.Request(Version, _community, pdu, id, oids, nonRepeaters, maxRepetitions);
         using var udp = new UdpClient(AddressFamily.InterNetwork);
-        udp.Connect(_host, 161);
+        udp.Connect(_host, _port);
         for (int attempt = 0; attempt <= _retries; attempt++)
         {
             await udp.SendAsync(request, ct).ConfigureAwait(false);

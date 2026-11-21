@@ -102,6 +102,8 @@ Traceroute sees only routers, never switches or ports. So, as in PRONETA or TIA 
 | **The default gateway** | shown as a router |
 
 SNMP is read-only, v2c with a fallback to v1, community `public` unless you type another one in the window.
+Tables are read with GETBULK. A device that answers GETBULK with an error, or not at all (some small embedded
+agents do), is read again with fewer rows per request, then with GETNEXT.
 The window asks every scanned device, then follows LLDP: the management address a neighbour announces is asked
 too, even when the scan didn't find it (a switch on a management subnet of its own, say). It repeats this until
 no new address turns up.

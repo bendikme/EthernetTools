@@ -30,6 +30,7 @@ internal static partial class SelfTest
             StationNames();
             SetNameDialog();
             Snmp();
+            SnmpWalks();
             LldpFrames();
             SnmpTables();
             TopologyMap();
