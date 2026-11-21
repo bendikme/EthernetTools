@@ -31,6 +31,8 @@ internal static partial class SelfTest
             SetNameDialog();
             Snmp();
             SnmpWalks();
+            SnmpV3();
+            ProfinetRecords();
             LldpFrames();
             SnmpTables();
             TopologyMap();

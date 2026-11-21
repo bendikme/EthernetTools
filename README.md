@@ -99,14 +99,26 @@ Traceroute sees only routers, never switches or ports. So, as in PRONETA or TIA 
 | **LLDP heard on the adapter** | the switch and port This PC is plugged into (switches send LLDP every 5-30 s; the window listens for 35 s) |
 | **SNMP, LLDP-MIB** | each device's neighbour on each of its ports (Profinet devices and managed switches carry it) |
 | **SNMP, BRIDGE-MIB** | a switch's MAC address table: places the devices that don't speak LLDP (PCs, printers) on their port |
+| **Profinet records** | a Profinet device that doesn't answer SNMP: each port's neighbour from its own PDPortDataReal record (as PRONETA reads it) |
 | **The default gateway** | shown as a router |
 
 SNMP is read-only, v2c with a fallback to v1, community `public` unless you type another one in the window.
+**SNMPv3...** on the window's toolbar takes an SNMPv3 user (authentication MD5, SHA-1 or SHA-256; privacy AES-128),
+asked before v2c and v1. The user is kept in memory until EthernetTools closes, never saved. A switch that only
+speaks SNMPv3 is named in the status bar's warning when no user is given; one that refuses the user says why
+(unknown user name, wrong password ...).
 Tables are read with GETBULK. A device that answers GETBULK with an error, or not at all (some small embedded
 agents do), is read again with fewer rows per request, then with GETNEXT.
 The window asks every scanned device, then follows LLDP: the management address a neighbour announces is asked
 too, even when the scan didn't find it (a switch on a management subnet of its own, say). It repeats this until
 no new address turns up.
+
+**Which switch first, then the port.** Just before reading the MAC tables, the window asks every device once
+more (ARP, and a DCP Identify). Each answer passes the switches on its way to This PC, so their tables are fresh.
+A device that answered but is missing from a switch's table didn't send its answer through that switch: it is on
+This PC's side of it, behind the port This PC is on. So every device that answers is placed behind the right switch,
+with its port where a table or LLDP tells it. The same refresh adds devices the scan missed (the default gateway,
+say) when they answer now.
 
 When the map can't be complete, the status bar says why in orange. Hover it for the details:
 - **No SNMP from switches:** switches that didn't answer SNMP, or had no address to ask, by name. Their ports
@@ -218,7 +230,9 @@ The version is in `EthernetTools.csproj` only (`<Version>`, `year.month.patch`);
 | `Pn/DcpProtocol.cs` | Profinet DCP frames: Identify, Signal, Set NameOfStation, and the devices' answers |
 | `Pn/DcpSet.cs` | Flash LED and Set Name: send, and read the device's answer |
 | `Pn/StationName.cs` | the rules of a Profinet name of station |
-| `Pn/Lldp.cs`, `Pn/Snmp.cs` | LLDP frames; a small read-only SNMP v1/v2c client |
+| `Pn/Lldp.cs`, `Pn/Snmp.cs`, `Pn/SnmpV3.cs` | LLDP frames; a small read-only SNMP client (v1, v2c, and v3 with USM: MD5/SHA keys and digests, AES-128) |
+| `Pn/ProfinetRpc.cs` | Profinet's own records over PNIO RPC: Read Implicit of PDPortDataReal (a port's neighbour) |
+| `SnmpV3Form.cs` | the SNMPv3 user dialog of the topology window |
 | `Pn/TopologyDiscovery.cs` | reads LLDP-MIB and BRIDGE-MIB from the devices, following LLDP to switches the scan missed; listens for LLDP on the adapter |
 | `Pn/Topology.cs`, `Pn/TopologyLayout.cs` | builds the map from what was found; lays it out as a tree |
 | `Pn/ArpProtocol.cs`, `Pn/NameResolver.cs` | ARP frames; NetBIOS and reverse-DNS names |

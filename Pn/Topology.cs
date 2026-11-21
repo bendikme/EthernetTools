@@ -72,8 +72,12 @@ public static class TopologyBuilder
 
     /// <param name="askedSnmp">The addresses asked over SNMP; null while nothing has been asked yet (no switch is then
     /// called silent).</param>
+    /// <param name="answeredMacs">The devices that answered just before the MAC tables were read (refreshing them): one
+    /// missing from a readable switch's table is placed on This PC's side of that switch.</param>
+    /// <param name="snmpProblems">Why a device that answers SNMP refused (an SNMPv3 report), by its address.</param>
     public static TopoGraph Build(IReadOnlyList<NetDevice> devices, ThisPcInfo thisPc, IReadOnlyList<LldpNeighbor> heardOnAdapter,
-        IReadOnlyList<SnmpAgentData> agents, IPAddress? gateway, IReadOnlyCollection<IPAddress>? askedSnmp = null)
+        IReadOnlyList<SnmpAgentData> agents, IPAddress? gateway, IReadOnlyCollection<IPAddress>? askedSnmp = null,
+        IReadOnlyCollection<string>? answeredMacs = null, IReadOnlyDictionary<string, string>? snmpProblems = null)
     {
         var graph = new TopoGraph();
         var byMac = new Dictionary<string, TopoNode>(StringComparer.OrdinalIgnoreCase);
@@ -126,7 +130,9 @@ public static class TopologyBuilder
             node ??= Add(new TopoNode { Id = "snmp:" + ip, Kind = TopoKind.Host, Ip = ip, Mac = chassisMac });
             node.Managed = true;
             if (agent.SysName.Length > 0 && node.Kind != TopoKind.ThisPc) node.Name = agent.SysName;
-            node.Detail = agent.SysDescr;
+            node.Detail = agent.FromProfinet
+                ? Join(node.Detail, "Neighbours read through Profinet (PDPortDataReal): it does not answer SNMP.")
+                : agent.SysDescr;
             if (node.Kind != TopoKind.ThisPc && agent.IsBridge && (node.Kind != TopoKind.Profinet || agent.LocalPorts.Count > 2 || agent.Fdb.Count > 0))
                 node.Kind = TopoKind.Switch;
             if (chassisMac is not null) byMac.TryAdd(chassisMac, node);
@@ -271,6 +277,59 @@ public static class TopologyBuilder
 
         var unmanaged = new Dictionary<(TopoNode, int), TopoNode>();
         var behind = new Dictionary<TopoNode, TopoNode>(); // neighbour -> its "port not known" group
+        // This PC's place in each readable switch's (complete) table: a device that answered just now - its answer
+        // reached This PC - but is missing from such a table did not send it through that switch. It is on This PC's
+        // side of the switch, behind the port This PC is seen on. Which switch first; the port where it can be told.
+        var answered = answeredMacs is null ? null : new HashSet<string>(answeredMacs, StringComparer.OrdinalIgnoreCase);
+        var pcSide = thisPc.Mac is { Length: > 0 } pcMac
+            ? bridges.Where(b => b.Key.FdbComplete && b.Key.Fdb.ContainsKey(pcMac))
+                .Select(b => (Agent: b.Key, Switch: b.Value, Port: b.Key.Fdb[pcMac])).ToList()
+            : [];
+        bool Readable(TopoNode n) => bridges.Any(b => ReferenceEquals(b.Value, n));
+
+        void OnPort(SnmpAgentData agent, TopoNode sw, int portNumber, TopoNode node, bool inferred)
+        {
+            string port = agent.PortName(portNumber);
+            int macs = portMacs.TryGetValue((sw, portNumber), out var list) ? list.Count + (inferred ? 1 : 0) : 1;
+            if (macs <= 1)
+            {
+                Link(sw, port, node, "", "MAC table");
+                node.Detail = Join(node.Detail, $"Placed by {sw.Name}'s MAC table.");
+                return;
+            }
+            if (!unmanaged.TryGetValue((sw, portNumber), out var hub))
+            {
+                var known = (list ?? []).Count(m => byMac.ContainsKey(m));
+                hub = Add(new TopoNode
+                {
+                    Id = $"hub:{sw.Id}:{portNumber}", Kind = TopoKind.UnmanagedSwitch,
+                    Name = "Unmanaged switch?",
+                    UnknownMacs = Math.Max(0, (list?.Count ?? 0) - known),
+                    Detail = $"{macs} MAC addresses on {sw.Name} port {port}, and no LLDP neighbour there: an " +
+                             "unmanaged switch, a hub, an access point or a virtual-machine host.",
+                });
+                unmanaged[(sw, portNumber)] = hub;
+                Link(sw, port, hub, "", "MAC table");
+            }
+            hub.Members.Add(node);
+            Link(hub, "", node, "", "MAC table");
+        }
+
+        void Behind(TopoNode via, TopoNode node)
+        {
+            if (!behind.TryGetValue(via, out var group))
+            {
+                group = Add(new TopoNode
+                {
+                    Id = "behind:" + via.Id, Kind = TopoKind.Group, Name = "Port not known",
+                    Detail = $"Behind {via.Name}, which does not tell its own MAC table (no SNMP): the port is not known.",
+                });
+                behind[via] = group;
+                Link(via, "", group, "", "MAC table");
+            }
+            group.Members.Add(node);
+        }
+
         foreach (var node in graph.Nodes.ToList())
         {
             if (node.Kind is TopoKind.Group or TopoKind.UnmanagedSwitch || linked.Contains(node) || node.Mac is null) continue;
@@ -279,58 +338,30 @@ public static class TopologyBuilder
                 .Select(b => (Agent: b.Key, Switch: b.Value, Port: b.Key.Fdb[node.Mac]))
                 .Where(c => !ReferenceEquals(c.Switch, node))
                 .ToList();
-            if (seen.Count == 0) continue;
+
+            // what the tables say: the edge-most port that sees it
             var edge = seen.Where(c => NeighborOn(c.Agent, c.Port) is null)
                 .OrderBy(c => portMacs[(c.Switch, c.Port)].Count).FirstOrDefault();
-            if (edge.Switch is not null)
+            if (edge.Switch is not null) { OnPort(edge.Agent, edge.Switch, edge.Port, node, inferred: false); continue; }
+
+            // only seen through ports that lead on to a neighbour: it is somewhere behind the one whose own MAC table
+            // cannot be read. When every such neighbour is a switch whose table was read (each says "behind the
+            // other": tables of different ages), the tables cannot tell.
+            var via = seen.Select(c => NeighborOn(c.Agent, c.Port)!).FirstOrDefault(n => !Readable(n));
+            if (via is not null) { Behind(via, node); continue; }
+
+            // not (or not consistently) in the tables, but it answered just now: on This PC's side of each readable
+            // switch whose table misses it
+            if (answered is null || node.Kind == TopoKind.ThisPc || !answered.Contains(node.Mac)) continue;
+            foreach (var side in pcSide.Where(c => !c.Agent.Fdb.ContainsKey(node.Mac) && !ReferenceEquals(c.Switch, node)))
             {
-                string port = edge.Agent.PortName(edge.Port);
-                int macs = portMacs[(edge.Switch, edge.Port)].Count;
-                if (macs <= 1)
-                {
-                    Link(edge.Switch, port, node, "", "MAC table");
-                    node.Detail = Join(node.Detail, $"Placed by {edge.Switch.Name}'s MAC table.");
-                }
-                else
-                {
-                    if (!unmanaged.TryGetValue((edge.Switch, edge.Port), out var hub))
-                    {
-                        var known = portMacs[(edge.Switch, edge.Port)].Count(m => byMac.ContainsKey(m));
-                        hub = Add(new TopoNode
-                        {
-                            Id = $"hub:{edge.Switch.Id}:{edge.Port}", Kind = TopoKind.UnmanagedSwitch,
-                            Name = "Unmanaged switch?",
-                            UnknownMacs = macs - known,
-                            Detail = $"{macs} MAC addresses on {edge.Switch.Name} port {port}, and no LLDP neighbour there: an " +
-                                     "unmanaged switch, a hub, an access point or a virtual-machine host.",
-                        });
-                        unmanaged[(edge.Switch, edge.Port)] = hub;
-                        Link(edge.Switch, port, hub, "", "MAC table");
-                    }
-                    hub.Members.Add(node);
-                    Link(hub, "", node, "", "MAC table");
-                }
-            }
-            else
-            {
-                // only seen through ports that lead on to a neighbour: it is somewhere behind the one whose own
-                // MAC table cannot be read. When every such neighbour is a switch whose table was read (each says
-                // "behind the other": tables of different ages), where it is cannot be told - not located.
-                var via = seen.Select(c => NeighborOn(c.Agent, c.Port)!)
-                    .FirstOrDefault(n => !bridges.Any(b => ReferenceEquals(b.Value, n)));
-                if (via is null) continue;
-                if (!behind.TryGetValue(via, out var group))
-                {
-                    group = Add(new TopoNode
-                    {
-                        Id = "behind:" + via.Id, Kind = TopoKind.Group, Name = "Port not known",
-                        Detail = $"Seen in the MAC tables behind {via.Name}, which does not tell its own MAC table (no SNMP): " +
-                                 "the port is not known.",
-                    });
-                    behind[via] = group;
-                    Link(via, "", group, "", "MAC table");
-                }
-                group.Members.Add(node);
+                var next = NeighborOn(side.Agent, side.Port);
+                if (next is not null && Readable(next)) continue; // that switch's table says more
+                node.Detail = Join(node.Detail, $"Not in {side.Switch.Name}'s MAC table, though it answered just now: its answer " +
+                                                $"did not pass {side.Switch.Name}, so it is on This PC's side of it.");
+                if (next is null) OnPort(side.Agent, side.Switch, side.Port, node, inferred: true);
+                else Behind(next, node);
+                break;
             }
         }
 
@@ -389,7 +420,10 @@ public static class TopologyBuilder
                 if (n.Kind != TopoKind.Switch || n.Managed) continue;
                 if (n.Ip is { Length: > 0 } ip && !asked.Contains(ip)) continue; // not asked (yet)
                 graph.Silent.Add(n);
-                n.Detail = Join(n.Detail, n.Ip is { Length: > 0 }
+                string? problem = n.Ip is { Length: > 0 } && snmpProblems?.TryGetValue(n.Ip, out var p) == true ? p : null;
+                n.Detail = Join(n.Detail, problem is not null
+                    ? $"Answers SNMP, but not to EthernetTools: {problem}. Its ports and MAC table are not known."
+                    : n.Ip is { Length: > 0 }
                     ? "Did not answer SNMP: its ports and MAC table are not known. Enable SNMP (read-only) on it for a complete map."
                     : "No management address known: it could not be asked over SNMP, so its ports and MAC table are not known.");
             }

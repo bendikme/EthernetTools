@@ -4,7 +4,7 @@ using System.Text;
 
 namespace EthernetTools.Pn;
 
-public enum SnmpVersion { V1 = 0, V2c = 1 }
+public enum SnmpVersion { V1 = 0, V2c = 1, V3 = 3 }
 
 /// <summary>An SNMP value: its BER tag and its content bytes.</summary>
 public readonly record struct SnmpValue(byte Tag, byte[] Data)
@@ -44,7 +44,7 @@ public sealed record SnmpResponse(int RequestId, int ErrorStatus, int ErrorIndex
 /// </summary>
 public static class Ber
 {
-    public const byte PduGet = 0xA0, PduGetNext = 0xA1, PduResponse = 0xA2, PduGetBulk = 0xA5;
+    public const byte PduGet = 0xA0, PduGetNext = 0xA1, PduResponse = 0xA2, PduGetBulk = 0xA5, PduReport = 0xA8;
 
     // ---- writing ----------------------------------------------------------------------------------------------
 
@@ -108,16 +108,22 @@ public static class Ber
     public static byte[] Request(SnmpVersion version, string community, byte pdu, int requestId, IEnumerable<string> oids,
         int nonRepeaters = 0, int maxRepetitions = 0)
     {
-        byte[][] varBinds = oids.Select(o => Sequence(0x30, Oid(o), Null())).ToArray();
-        bool bulk = pdu == PduGetBulk;
         return Sequence(0x30,
             Integer((int)version),
             OctetString(community),
-            Sequence(pdu,
-                Integer(requestId),
-                Integer(bulk ? nonRepeaters : 0),
-                Integer(bulk ? maxRepetitions : 0),
-                Sequence(0x30, varBinds)));
+            Pdu(pdu, requestId, oids, nonRepeaters, maxRepetitions));
+    }
+
+    /// <summary>A request PDU (its tag included): request id, the two numbers (GETBULK's), the OIDs with NULL values.</summary>
+    public static byte[] Pdu(byte pdu, int requestId, IEnumerable<string> oids, int nonRepeaters = 0, int maxRepetitions = 0)
+    {
+        byte[][] varBinds = oids.Select(o => Sequence(0x30, Oid(o), Null())).ToArray();
+        bool bulk = pdu == PduGetBulk;
+        return Sequence(pdu,
+            Integer(requestId),
+            Integer(bulk ? nonRepeaters : 0),
+            Integer(bulk ? maxRepetitions : 0),
+            Sequence(0x30, varBinds));
     }
 
     // ---- reading ----------------------------------------------------------------------------------------------
@@ -183,6 +189,12 @@ public static class Ber
         Read(body, ref b);                    // community
         var (pduTag, pdu) = Read(body, ref b);
         if (pduTag != PduResponse) throw new FormatException($"SNMP: PDU 0x{pduTag:x2} is not a response");
+        return ReadPdu(pdu);
+    }
+
+    /// <summary>A PDU's content (any PDU: request id, error status and index, variable bindings).</summary>
+    public static SnmpResponse ReadPdu(ReadOnlySpan<byte> pdu)
+    {
         int p = 0;
         int requestId = (int)ReadInteger(Read(pdu, ref p).Content);
         int errorStatus = (int)ReadInteger(Read(pdu, ref p).Content);
@@ -204,8 +216,9 @@ public static class Ber
 }
 
 /// <summary>
-/// A small SNMP v1/v2c client over UDP port 161: GET, and a walk of a subtree (GETBULK with v2c, GETNEXT with v1).
-/// Read-only - nothing is ever set.
+/// A small SNMP client over UDP port 161: GET, and a walk of a subtree (GETBULK with v2c and v3, GETNEXT with v1).
+/// v1 and v2c with a community; v3 with a USM user (<see cref="SnmpV3Credentials"/>): engine discovery, then
+/// authenticated (MD5, SHA-1, SHA-256) and encrypted (AES-128) requests. Read-only - nothing is ever set.
 /// </summary>
 public sealed class SnmpClient
 {
@@ -215,6 +228,14 @@ public sealed class SnmpClient
     private readonly int _retries;
     private readonly int _port;
     private static int _requestId = Random.Shared.Next(1, int.MaxValue / 2);
+    private static long _salt = Random.Shared.NextInt64();
+
+    // SNMPv3: the user, and what engine discovery learned (the engine, its boots and time, the localized keys)
+    private readonly SnmpV3Credentials? _user;
+    private byte[]? _engineId;
+    private int _boots, _time;
+    private readonly System.Diagnostics.Stopwatch _since = new();
+    private byte[]? _authKey, _privKey;
 
     /// <summary>GETBULK's max-repetitions, then what a walk falls back to when an agent fails it.</summary>
     public const int BulkRepetitions = 24, SmallBulkRepetitions = 4;
@@ -222,6 +243,7 @@ public sealed class SnmpClient
     /// <param name="port">UDP port of the agent (161; the self-test's fake agent listens elsewhere).</param>
     public SnmpClient(IPAddress host, string community, SnmpVersion version, TimeSpan timeout, int retries = 1, int port = 161)
     {
+        if (version == SnmpVersion.V3) throw new ArgumentException("SNMPv3 takes a user, not a community.");
         _host = host;
         _community = community;
         Version = version;
@@ -230,7 +252,25 @@ public sealed class SnmpClient
         _port = port;
     }
 
+    /// <summary>An SNMPv3 client for <paramref name="user"/>.</summary>
+    public SnmpClient(IPAddress host, SnmpV3Credentials user, TimeSpan timeout, int retries = 1, int port = 161)
+    {
+        _host = host;
+        _community = "";
+        _user = user;
+        Version = SnmpVersion.V3;
+        _timeout = timeout;
+        _retries = retries;
+        _port = port;
+    }
+
     public SnmpVersion Version { get; }
+
+    /// <summary>Why the last request got no answer, when the agent said why (an SNMPv3 report): "unknown user name" ...</summary>
+    public string? LastError { get; private set; }
+
+    /// <summary>The last walk reached the end of its subtree (not cut short by a silent agent or the row limit).</summary>
+    public bool LastWalkComplete { get; private set; }
 
     /// <summary>The values of <paramref name="oids"/>, or null when the agent does not answer.</summary>
     public async Task<IReadOnlyList<SnmpVarBind>?> GetAsync(IReadOnlyList<string> oids, CancellationToken ct)
@@ -265,10 +305,17 @@ public sealed class SnmpClient
     /// </summary>
     public async Task<List<SnmpVarBind>?> WalkAsync(string root, CancellationToken ct, int maxRows = 5000)
     {
+        LastWalkComplete = false;
+        var rows = await WalkRowsAsync(root, ct, maxRows).ConfigureAwait(false);
+        return rows;
+    }
+
+    private async Task<List<SnmpVarBind>?> WalkRowsAsync(string root, CancellationToken ct, int maxRows)
+    {
         string prefix = root.TrimStart('.') + ".";
         var rows = new List<SnmpVarBind>();
         string next = root.TrimStart('.');
-        int repetitions = Version == SnmpVersion.V2c ? BulkRepetitions : 0; // 0: GETNEXT
+        int repetitions = Version != SnmpVersion.V1 ? BulkRepetitions : 0; // 0: GETNEXT
         while (rows.Count < maxRows)
         {
             ct.ThrowIfCancellationRequested();
@@ -282,11 +329,14 @@ public sealed class SnmpClient
                 continue;
             }
             if (response is null) return rows.Count > 0 ? rows : null;
-            if (response.ErrorStatus != 0 || response.VarBinds.Count == 0) return rows; // v1: noSuchName = the end
+            if (response.ErrorStatus != 0 || response.VarBinds.Count == 0) { LastWalkComplete = true; return rows; } // v1: noSuchName = the end
             foreach (var vb in response.VarBinds)
             {
                 if (!vb.Oid.StartsWith(prefix, StringComparison.Ordinal) || vb.Value.Tag == SnmpValue.TagEndOfMibView)
+                {
+                    LastWalkComplete = true;
                     return rows;
+                }
                 if (CompareOid(vb.Oid, next) <= 0) return rows; // an agent that does not move forward
                 rows.Add(vb);
                 next = vb.Oid;
@@ -295,10 +345,19 @@ public sealed class SnmpClient
         return rows;
     }
 
-    private async Task<SnmpResponse?> RequestAsync(byte pdu, IReadOnlyList<string> oids, int nonRepeaters, int maxRepetitions, CancellationToken ct)
+    private static int NextId() => Interlocked.Increment(ref _requestId) & 0x7FFFFFFF;
+
+    private Task<SnmpResponse?> RequestAsync(byte pdu, IReadOnlyList<string> oids, int nonRepeaters, int maxRepetitions, CancellationToken ct)
     {
-        int id = Interlocked.Increment(ref _requestId) & 0x7FFFFFFF;
+        if (Version == SnmpVersion.V3) return RequestV3Async(pdu, oids, nonRepeaters, maxRepetitions, ct);
+        int id = NextId();
         byte[] request = Ber.Request(Version, _community, pdu, id, oids, nonRepeaters, maxRepetitions);
+        return ExchangeAsync(request, buffer => Ber.ReadResponse(buffer) is { } r && r.RequestId == id ? r : null, ct);
+    }
+
+    /// <summary>Sends <paramref name="request"/> (again, on a time-out) until an answer <paramref name="match"/> accepts.</summary>
+    private async Task<T?> ExchangeAsync<T>(byte[] request, Func<byte[], T?> match, CancellationToken ct) where T : class
+    {
         using var udp = new UdpClient(AddressFamily.InterNetwork);
         udp.Connect(_host, _port);
         for (int attempt = 0; attempt <= _retries; attempt++)
@@ -311,10 +370,10 @@ public sealed class SnmpClient
                 while (true)
                 {
                     var received = await udp.ReceiveAsync(wait.Token).ConfigureAwait(false);
-                    SnmpResponse response;
-                    try { response = Ber.ReadResponse(received.Buffer); }
-                    catch (FormatException) { continue; }
-                    if (response.RequestId == id) return response;
+                    T? answer;
+                    try { answer = match(received.Buffer); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { continue; } // not an answer we can read
+                    if (answer is not null) return answer;
                 }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { /* timed out: try again */ }
@@ -322,6 +381,74 @@ public sealed class SnmpClient
         }
         return null;
     }
+
+    // ---- SNMPv3 ---------------------------------------------------------------------------------------------------
+
+    /// <summary>SNMPv3 only: the agent answers engine discovery.</summary>
+    public Task<bool> DiscoverEngineAsync(CancellationToken ct) =>
+        Version == SnmpVersion.V3 ? DiscoverAsync(ct) : Task.FromResult(false);
+
+    /// <summary>Engine discovery (RFC 3414 4): an empty, unauthenticated request; the report names the engine, its boots and time.</summary>
+    private async Task<bool> DiscoverAsync(CancellationToken ct)
+    {
+        int id = NextId();
+        byte[] request = SnmpV3Message.Build(id, null, 4, [], 0, 0, Ber.Pdu(Ber.PduGet, id, []), null, null, []);
+        var report = await ExchangeAsync(request, buffer => SnmpV3Message.Read(buffer, (_, _) => null) is { } m && m.MessageId == id ? m : null, ct)
+            .ConfigureAwait(false);
+        if (report is not { EngineId.Length: > 0 }) return false;
+        _engineId = report.EngineId;
+        _boots = report.Boots;
+        _time = report.Time;
+        _since.Restart();
+        if (_user!.Auth != SnmpAuth.None)
+        {
+            _authKey = await Task.Run(() => Usm.LocalizedKey(_user.Auth, _user.AuthPassword, _engineId), ct).ConfigureAwait(false);
+            if (_user.Priv != SnmpPriv.None)
+                _privKey = await Task.Run(() => Usm.LocalizedKey(_user.Auth, _user.PrivPassword, _engineId), ct).ConfigureAwait(false);
+        }
+        return true;
+    }
+
+    private async Task<SnmpResponse?> RequestV3Async(byte pdu, IReadOnlyList<string> oids, int nonRepeaters, int maxRepetitions, CancellationToken ct)
+    {
+        if (_engineId is null && !await DiscoverAsync(ct).ConfigureAwait(false)) return null;
+        var user = _user!;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            int id = NextId();
+            byte[] salt = new byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(salt, Interlocked.Increment(ref _salt));
+            int time = _time + (int)_since.Elapsed.TotalSeconds;
+            byte[] request = SnmpV3Message.Build(id, user, user.Flags, _engineId!, _boots, time,
+                Ber.Pdu(pdu, id, oids, nonRepeaters, maxRepetitions), _authKey, _privKey, salt);
+            var answer = await ExchangeAsync(request, buffer => SnmpV3Message.Read(buffer, Keys) is { } m && m.MessageId == id ? m : null, ct)
+                .ConfigureAwait(false);
+            if (answer is null) return null;
+            if (answer.PduTag == Ber.PduReport)
+            {
+                string? reason = answer.Pdu?.VarBinds.FirstOrDefault()?.Oid;
+                if (reason == UsmReport.NotInTimeWindows && attempt == 0)
+                {
+                    // the agent's clock, from its report: then once more
+                    _boots = answer.Boots;
+                    _time = answer.Time;
+                    _since.Restart();
+                    continue;
+                }
+                LastError = "SNMPv3: " + UsmReport.Text(reason);
+                return null;
+            }
+            if (answer.Pdu is null) { LastError = "SNMPv3: the answer could not be decrypted"; return null; }
+            if (user.Auth != SnmpAuth.None && !answer.Authentic) { LastError = "SNMPv3: the answer's digest does not match"; return null; }
+            LastError = null;
+            return answer.Pdu;
+        }
+        return null;
+    }
+
+    private (SnmpV3Credentials, byte[], byte[]?)? Keys(string user, byte[] engineId) =>
+        _user is { Auth: not SnmpAuth.None } u && _authKey is not null && engineId.AsSpan().SequenceEqual(_engineId)
+            ? (u, _authKey, _privKey) : null;
 
     /// <summary>Numeric order of two OIDs.</summary>
     public static int CompareOid(string a, string b)

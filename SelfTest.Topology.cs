@@ -391,6 +391,24 @@ internal static partial class SelfTest
         Check("no switch is called silent before anything is asked, nor one whose address was not asked",
             before.Silent.Count == 0 && unasked.Silent.Select(n => n.Name).SequenceEqual(["core"]));
 
+        // which switch first: devices that answered just now but are in no table are on This PC's side of each
+        // readable switch that misses them - here behind the core (no SNMP), which This PC's side of A leads to
+        var everyone = devices.Select(d => d.MacString).ToList();
+        var pcInfo = new ThisPcInfo("this-pc", Ms(99), "10.0.0.99", "Ethernet");
+        var placed = TopologyBuilder.Build(devices, pcInfo, heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"), asked, everyone);
+        var coreGroup = placed.Nodes.SingleOrDefault(n => n.Kind == TopoKind.Group && n.Name == "Port not known");
+        Check("answered just now, in no MAC table (h6): behind the core, the way This PC's side of sw-a leads; h7 (tables that contradict) stays not located",
+            coreGroup is not null && coreGroup.Members.Any(m => m.Name == "h6" && m.Detail?.Contains("This PC's side") == true)
+            && placed.NotLocated is { } still && still.Members.Select(m => m.Name).SequenceEqual(["h7"]));
+        a.FdbComplete = false;
+        var partial = TopologyBuilder.Build(devices, pcInfo, heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"), asked, everyone);
+        a.FdbComplete = true;
+        Check("nothing is inferred from a MAC table read only in part", partial.NotLocated?.Members.Any(m => m.Name == "h6") == true);
+        var refused = TopologyBuilder.Build(devices, pcInfo, heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"), asked, null,
+            new Dictionary<string, string> { ["10.0.0.1"] = "SNMPv3: unknown user name" });
+        Check("a switch that refused (an SNMPv3 report) says why",
+            refused.Silent.Single(n => n.Name == "core").Detail?.Contains("SNMPv3: unknown user name") == true);
+
         var layout = TopologyLayout.Layout(g);
         bool overlap = layout.Nodes.Any(x => layout.Nodes.Any(y => !ReferenceEquals(x, y) && RectangleF.Intersect(x.Box, y.Box) is { Width: > 0.5f, Height: > 0.5f }));
         Check("layout: every box placed once, none overlapping, This PC on top",

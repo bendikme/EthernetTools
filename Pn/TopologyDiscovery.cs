@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using SharpPcap;
@@ -23,6 +24,10 @@ public sealed class SnmpAgentData
     public Dictionary<string, int> Fdb { get; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Bridge port -> the port's name (ifName through dot1dBasePortIfIndex), where known.</summary>
     public Dictionary<int, string> BridgePortNames { get; } = new();
+    /// <summary>The MAC table was read to its end: a MAC missing from it is not in it (not just unread).</summary>
+    public bool FdbComplete { get; set; } = true;
+    /// <summary>Read through Profinet's own records (PDPortDataReal), not SNMP.</summary>
+    public bool FromProfinet { get; init; }
 
     public bool IsBridge => (Services & 2) != 0 || LocalPorts.Count >= 3 || Fdb.Count > 0;
 
@@ -39,8 +44,26 @@ public sealed class SnmpAgentData
     private static bool LooksLikeMac(string s) => s.Length == 17 && s.Count(c => c == ':') == 5;
 }
 
+/// <summary>What the refresh before the MAC tables are read heard: who answered (MACs), and the address of each that spoke ARP.</summary>
+public sealed class RefreshResult
+{
+    public HashSet<string> Answered { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, IPAddress> Arp { get; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>How to ask over SNMP: the v1/v2c community, an SNMPv3 user (asked first when given); and, filled in while
+/// asking, why devices that answered refused (an SNMPv3 report), by address.</summary>
+public sealed class SnmpSettings
+{
+    public SnmpSettings(string community, SnmpV3Credentials? v3 = null) { Community = community; V3 = v3; }
+    public string Community { get; }
+    public SnmpV3Credentials? V3 { get; }
+    public ConcurrentDictionary<string, string> Problems { get; } = new();
+    public static implicit operator SnmpSettings(string community) => new(community);
+}
+
 /// <summary>
-/// Reads, over SNMP (read-only, v2c then v1), what each device knows of the topology: system name, LLDP-MIB local
+/// Reads, over SNMP (read-only: v3 when a user is given, v2c, v1), what each device knows of the topology: system name, LLDP-MIB local
 /// ports and neighbours (IEEE 802.1AB, 1.0.8802.1.1.2) and - from switches - the BRIDGE-MIB MAC table.
 /// </summary>
 public static class TopologyDiscovery
@@ -59,7 +82,7 @@ public static class TopologyDiscovery
     /// Ask every address (64 at a time); the agents that answer, with what they told. <paramref name="progress"/>
     /// hears how far it is.
     /// </summary>
-    public static async Task<List<SnmpAgentData>> ProbeAsync(IReadOnlyCollection<IPAddress> addresses, string community,
+    public static async Task<List<SnmpAgentData>> ProbeAsync(IReadOnlyCollection<IPAddress> addresses, SnmpSettings snmp,
         IProgress<string>? progress, CancellationToken ct)
     {
         var agents = new List<SnmpAgentData>();
@@ -70,7 +93,7 @@ public static class TopologyDiscovery
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                var agent = await ProbeOneAsync(ip, community, ct).ConfigureAwait(false);
+                var agent = await ProbeOneAsync(ip, snmp, ct).ConfigureAwait(false);
                 if (agent is not null) lock (agents) agents.Add(agent);
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { /* one device's trouble is not the map's */ }
@@ -93,7 +116,7 @@ public static class TopologyDiscovery
     /// two of its addresses is kept once.
     /// </summary>
     public static async Task<List<SnmpAgentData>> CrawlAsync(IReadOnlyCollection<IPAddress> addresses, IReadOnlyCollection<LldpNeighbor> heard,
-        string community, ISet<IPAddress> asked, IReadOnlyCollection<SnmpAgentData>? known, IProgress<string>? progress, CancellationToken ct,
+        SnmpSettings snmp, ISet<IPAddress> asked, IReadOnlyCollection<SnmpAgentData>? known, IProgress<string>? progress, CancellationToken ct,
         int maxRounds = 6, int maxFollowed = 256)
     {
         var agents = new List<SnmpAgentData>(known ?? []);
@@ -107,7 +130,7 @@ public static class TopologyDiscovery
             next.AddRange(follow);
             if (next.Count == 0) break;
             if (follow.Count > 0) progress?.Report($"SNMP: following LLDP to {follow.Count} more address(es)...");
-            foreach (var agent in await ProbeAsync(next, community, progress, ct).ConfigureAwait(false))
+            foreach (var agent in await ProbeAsync(next, snmp, progress, ct).ConfigureAwait(false))
                 if (!agents.Any(a => SameDevice(a, agent))) agents.Add(agent);
             next = new List<IPAddress>();
         }
@@ -138,15 +161,20 @@ public static class TopologyDiscovery
     private static List<SnmpAgentData> ByAddress(IEnumerable<SnmpAgentData> agents) =>
         agents.OrderBy(a => a.Ip.GetAddressBytes(), Comparer<byte[]>.Create((x, y) => x.AsSpan().SequenceCompareTo(y))).ToList();
 
-    public static async Task<SnmpAgentData?> ProbeOneAsync(IPAddress ip, string community, CancellationToken ct)
+    public static async Task<SnmpAgentData?> ProbeOneAsync(IPAddress ip, SnmpSettings snmp, CancellationToken ct)
     {
         string[] system = [SysName, SysDescr, SysServices, LldpLocChassisIdSubtype, LldpLocChassisId];
-        foreach (var version in new[] { SnmpVersion.V2c, SnmpVersion.V1 })
+        var versions = snmp.V3 is null ? new[] { SnmpVersion.V2c, SnmpVersion.V1 } : [SnmpVersion.V3, SnmpVersion.V2c, SnmpVersion.V1];
+        foreach (var version in versions)
         {
-            // v2c with one retry; v1 (older Profinet devices, some switches) once more, without
-            var client = new SnmpClient(ip, community, version, TimeSpan.FromSeconds(1), retries: version == SnmpVersion.V2c ? 1 : 0);
+            // v3 (when a user is given) and v2c with one retry; v1 (older Profinet devices, some switches) once more, without
+            var client = version == SnmpVersion.V3
+                ? new SnmpClient(ip, snmp.V3!, TimeSpan.FromSeconds(1), retries: 1)
+                : new SnmpClient(ip, snmp.Community, version, TimeSpan.FromSeconds(1), retries: version == SnmpVersion.V2c ? 1 : 0);
             var sys = await client.GetAsync(system, ct).ConfigureAwait(false);
+            if (client.LastError is { } refused) snmp.Problems[ip.ToString()] = refused; // it answers v3, but not to this user
             if (sys is null || sys.Count < 5) continue;
+            snmp.Problems.TryRemove(ip.ToString(), out _);
 
             var agent = new SnmpAgentData
             {
@@ -165,8 +193,14 @@ public static class TopologyDiscovery
             if (agent.IsBridge)
             {
                 var fdb = await client.WalkAsync(Dot1dTpFdbPort, ct, 16000).ConfigureAwait(false);
-                if (fdb is null or { Count: 0 }) fdb = await client.WalkAsync(Dot1qTpFdbPort, ct, 16000).ConfigureAwait(false);
+                bool complete = client.LastWalkComplete;
+                if (fdb is null or { Count: 0 })
+                {
+                    fdb = await client.WalkAsync(Dot1qTpFdbPort, ct, 16000).ConfigureAwait(false);
+                    complete = client.LastWalkComplete;
+                }
                 ReadFdb(agent, fdb);
+                agent.FdbComplete = complete;
                 if (agent.Fdb.Count > 0)
                     ReadBridgePortNames(agent,
                         await client.WalkAsync(Dot1dBasePortIfIndex, ct, 2000).ConfigureAwait(false),
@@ -175,6 +209,71 @@ public static class TopologyDiscovery
             return agent;
         }
         return null;
+    }
+
+    /// <summary>The agent at <paramref name="ip"/> answers SNMPv3 engine discovery (it has SNMPv3, whatever its users).</summary>
+    public static Task<bool> AnswersV3Async(IPAddress ip, CancellationToken ct) =>
+        new SnmpClient(ip, new SnmpV3Credentials("", SnmpAuth.None, "", SnmpPriv.None, ""), TimeSpan.FromSeconds(1), retries: 1)
+            .DiscoverEngineAsync(ct);
+
+    /// <summary>
+    /// Refreshes the switches' MAC tables just before they are read, and says who is there now: an ARP request to
+    /// every scanned IPv4 address of this subnet (and <paramref name="alsoAsk"/>, the default gateway say) and a DCP
+    /// Identify; every device that answers sends its answer to This PC, and each switch on the way learns (again)
+    /// where it is. The MACs heard within <paramref name="listen"/>, and the address of each that spoke ARP - which
+    /// also finds devices the scan missed.
+    /// </summary>
+    public static Task<RefreshResult> RefreshAsync(AdapterInfo adapter, IReadOnlyCollection<NetDevice> devices, IEnumerable<IPAddress> alsoAsk,
+        TimeSpan listen, CancellationToken ct) => Task.Run(() =>
+    {
+        var result = new RefreshResult();
+        string name = adapter.PcapDevice?.Name ?? throw new InvalidOperationException($"'{adapter.FriendlyName}' is not bound to Npcap.");
+        using var pcap = LibPcapLiveDeviceList.New().FirstOrDefault(d => d.Name == name)
+            ?? throw new InvalidOperationException("The adapter is not there any more. Press Refresh.");
+        pcap.Open(new DeviceConfiguration { Mode = DeviceModes.Promiscuous, ReadTimeout = 50, Immediate = true });
+        try { pcap.Filter = "arp or (ether proto 0x8892) or (vlan and ether proto 0x8892)"; } catch { }
+        var own = adapter.MacAddress;
+        var unicast = adapter.NetworkInterface.GetIPProperties().UnicastAddresses
+            .FirstOrDefault(u => u.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+        uint xid = (uint)Random.Shared.Next(1, int.MaxValue);
+        try { pcap.SendPacket(DcpProtocol.BuildIdentifyAllRequest(own, xid)); } catch { }
+        if (unicast is { IPv4Mask: { } mask })
+        {
+            uint net = ToUint(unicast.Address) & ToUint(mask);
+            foreach (var ip in devices.Select(d => d.IPAddress).OfType<IPAddress>().Concat(alsoAsk).Distinct())
+            {
+                if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || (ToUint(ip) & ToUint(mask)) != net) continue;
+                try { pcap.SendPacket(ArpProtocol.BuildRequest(own, unicast.Address, ip)); } catch { }
+            }
+        }
+        string ownMac = string.Join(":", own.GetAddressBytes().Select(b => b.ToString("X2")));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed < listen && !ct.IsCancellationRequested)
+        {
+            if (pcap.GetNextPacket(out PacketCapture capture) != GetPacketStatus.PacketRead) continue;
+            var data = capture.Data;
+            if (data.Length < 14) continue;
+            string source = string.Join(":", data.Slice(6, 6).ToArray().Select(b => b.ToString("X2")));
+            if (source == ownMac) continue;
+            // any ARP or Profinet frame from it: it reached This PC, so it came the device's way here
+            if (ArpProtocol.TryParse(data, out var arpMac, out var arpIp, out _))
+            {
+                result.Answered.Add(source);
+                if (Askable(arpIp) && string.Join(":", arpMac.GetAddressBytes().Select(b => b.ToString("X2"))) == source)
+                    result.Arp[source] = arpIp;
+            }
+            else if (DcpProtocol.ProfinetOffset(data) >= 0) result.Answered.Add(source);
+        }
+        return result;
+
+        static uint ToUint(IPAddress a) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(a.GetAddressBytes());
+    }, ct);
+
+    /// <summary>A device the scan missed but the refresh heard (an ARP answer or request), for the map.</summary>
+    public static NetDevice HeardDevice(string mac, IPAddress ip)
+    {
+        var address = new PhysicalAddress(Convert.FromHexString(mac.Replace(":", "")));
+        return new NetDevice { MacAddress = address, IPAddress = ip, Sources = DiscoverySource.Arp, VendorName = OuiLookup.Lookup(address) };
     }
 
     // ---- reading the tables (also used by the self-test) ----------------------------------------------------------

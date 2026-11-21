@@ -14,12 +14,20 @@ internal sealed class TopologyForm : Form
 {
     private readonly AdapterInfo _adapter;
     private readonly IReadOnlyList<NetDevice> _devices;
+    /// <summary>The scanned devices and those the refresh heard that the scan missed: what the map draws.</summary>
+    private List<NetDevice> _mapDevices;
     private readonly List<LldpNeighbor> _heard;
     private readonly Action<NetDevice>? _select;
     private List<SnmpAgentData> _agents = new();
     /// <summary>The addresses asked over SNMP by the last discovery; null until it has asked.</summary>
     private HashSet<IPAddress>? _asked;
     private string _community = "public";
+    /// <summary>The SNMPv3 user, for the whole session (never saved).</summary>
+    private static SnmpV3Credentials? s_v3;
+    /// <summary>The devices that answered the refresh just before the MAC tables were read; null until then.</summary>
+    private HashSet<string>? _answered;
+    /// <summary>Why devices that answer SNMP refused (SNMPv3 reports), by address.</summary>
+    private Dictionary<string, string> _problems = new();
     /// <summary>The last discovery has listened for LLDP on the adapter to the end.</summary>
     private bool _listened;
     private TopoGraph? _graph;
@@ -29,7 +37,7 @@ internal sealed class TopologyForm : Form
     private const int ListenSeconds = 35;
 
     private readonly TopologyView view;
-    private readonly ToolStripButton btnDiscover, btnFit, btnExport;
+    private readonly ToolStripButton btnDiscover, btnFit, btnExport, btnV3;
     private readonly ToolStripTextBox txtCommunity;
     private readonly ToolStripStatusLabel lblStatus, lblWarn;
 
@@ -39,6 +47,7 @@ internal sealed class TopologyForm : Form
     {
         _adapter = adapter;
         _devices = devices;
+        _mapDevices = devices.ToList();
         _heard = heard.ToList();
         _select = select;
 
@@ -54,13 +63,14 @@ internal sealed class TopologyForm : Form
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, RenderMode = ToolStripRenderMode.System, Padding = new Padding(8, 2, 8, 2) };
         btnDiscover = new ToolStripButton("Discover again") { ToolTipText = "Ask the devices again over SNMP and listen for LLDP" };
         txtCommunity = new ToolStripTextBox { Text = "public", Width = 110, ToolTipText = "SNMP community (read)" };
+        btnV3 = new ToolStripButton(V3Text()) { ToolTipText = "An SNMPv3 user to ask with (asked before v2c and v1; kept until EthernetTools closes)" };
         btnFit = new ToolStripButton("Fit") { ToolTipText = "Fit the map to the window (F)" };
         var btnIn = new ToolStripButton("+") { ToolTipText = "Zoom in (+, or the mouse wheel)" };
         var btnOut = new ToolStripButton("-") { ToolTipText = "Zoom out (-)" };
         btnExport = new ToolStripButton("Export PNG...") { ToolTipText = "Save the whole map as a picture" };
         tools.Items.AddRange(new ToolStripItem[]
         {
-            btnDiscover, new ToolStripSeparator(), new ToolStripLabel("SNMP community:"), txtCommunity, new ToolStripSeparator(),
+            btnDiscover, new ToolStripSeparator(), new ToolStripLabel("SNMP community:"), txtCommunity, btnV3, new ToolStripSeparator(),
             btnFit, btnIn, btnOut, new ToolStripSeparator(), btnExport,
             new ToolStripLabel("Drag to move, wheel to zoom, hover a box for details, double-click to select it in the list")
                 { Alignment = ToolStripItemAlignment.Right, ForeColor = Color.Gray },
@@ -83,6 +93,14 @@ internal sealed class TopologyForm : Form
         btnIn.Click += (_, _) => view.Zoom(1.25f);
         btnOut.Click += (_, _) => view.Zoom(1 / 1.25f);
         btnExport.Click += (_, _) => Export();
+        btnV3.Click += async (_, _) =>
+        {
+            using var dialog = new SnmpV3Form(s_v3);
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            s_v3 = dialog.Credentials;
+            btnV3.Text = V3Text();
+            await DiscoverAsync();
+        };
         view.NodeActivated += n => { if (n.Device is { } d) _select?.Invoke(d); };
         KeyDown += (_, e) =>
         {
@@ -94,6 +112,8 @@ internal sealed class TopologyForm : Form
         Shown += async (_, _) => { Rebuild(fit: true); await DiscoverAsync(); };
         FormClosing += (_, _) => _cts?.Cancel();
     }
+
+    private static string V3Text() => s_v3 is null ? "SNMPv3..." : $"SNMPv3: {s_v3.User}";
 
     /// <summary>The map as it stands (for the self-test and the export).</summary>
     internal TopoGraph? Graph => _graph;
@@ -108,8 +128,10 @@ internal sealed class TopologyForm : Form
         var ct = _cts.Token;
         _community = txtCommunity.Text.Trim();
         _asked = null;
+        _answered = null;
         _listened = false;
         UpdateWarnings();
+        var snmp = new SnmpSettings(_community, s_v3);
         try
         {
             // LLDP on the adapter, beside the SNMP questions: who This PC is plugged into (sent every 5-30 s)
@@ -128,14 +150,47 @@ internal sealed class TopologyForm : Form
             var listening = listener.RunAsync(_adapter, TimeSpan.FromSeconds(ListenSeconds), ct);
             _ = listening.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
-            // the scanned devices, then whatever their LLDP neighbours name (switches the scan did not find)
-            var addresses = _devices.Where(d => d.IPAddress is { AddressFamily: AddressFamily.InterNetwork })
-                .Select(d => d.IPAddress!).Distinct().ToList();
             var progress = new Progress<string>(s => { if (!IsDisposed) lblStatus.Text = s; });
+
+            // first, refresh the switches' MAC tables and see who is there now (each answer passes the switches on
+            // its way to This PC); the tables are read right after
+            lblStatus.Text = "Asking every device once more (ARP, DCP), so the switches' MAC tables are fresh...";
+            HashSet<string>? answered = null;
+            var mapDevices = _devices.ToList();
+            try
+            {
+                var refresh = await TopologyDiscovery.RefreshAsync(_adapter, _devices, Gateway() is { } gw ? [gw] : [], TimeSpan.FromSeconds(2.5), ct);
+                answered = refresh.Answered;
+                // devices the scan missed (it happens: a lost ARP answer, the gateway among them) but that spoke now
+                var known = _devices.Select(d => d.MacString).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                known.Add(_adapter.MacString());
+                mapDevices.AddRange(refresh.Arp.Where(kv => !known.Contains(kv.Key)).Select(kv => TopologyDiscovery.HeardDevice(kv.Key, kv.Value)));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { /* without it, the tables are as they are */ }
+            _mapDevices = mapDevices;
+
+            // the scanned devices, then whatever their LLDP neighbours name (switches the scan did not find)
+            var addresses = _mapDevices.Where(d => d.IPAddress is { AddressFamily: AddressFamily.InterNetwork })
+                .Select(d => d.IPAddress!).Distinct().ToList();
             var asked = new HashSet<IPAddress>(); // the crawl's own: Rebuild reads _asked on the UI thread meanwhile
-            _agents = await TopologyDiscovery.CrawlAsync(addresses, _heard.ToList(), _community, asked, null, progress, ct);
+            _agents = await TopologyDiscovery.CrawlAsync(addresses, _heard.ToList(), snmp, asked, null, progress, ct);
             _asked = new HashSet<IPAddress>(asked);
+            _answered = answered;
+            _problems = new Dictionary<string, string>(snmp.Problems);
+
+            // Profinet devices that do not answer SNMP: their own port records
+            _agents = await ReadProfinetAsync(_agents, progress, ct);
             Rebuild(fit: true);
+
+            // silent switches that speak SNMPv3 (without a user given, or not to it): say so
+            if (s_v3 is null && _graph is { } g)
+            {
+                var v3Only = await Task.WhenAll(g.Silent.Where(n => n.Ip is { Length: > 0 } ip && !_problems.ContainsKey(ip))
+                    .Select(async n => (n.Ip!, await TopologyDiscovery.AnswersV3Async(IPAddress.Parse(n.Ip!), ct))));
+                foreach (var (ip, v3) in v3Only.Where(x => x.Item2))
+                    _problems[ip] = "it answers SNMPv3 only; enter a v3 user with SNMPv3... on the toolbar";
+                if (v3Only.Any(x => x.Item2)) Rebuild(fit: false);
+            }
             lblStatus.Text = Summary() + "  Listening for LLDP on the adapter for a while longer...";
             bool listenedToTheEnd = true;
             try { await listening; }
@@ -146,8 +201,9 @@ internal sealed class TopologyForm : Form
 
             // what was heard on the adapter meanwhile may name a switch not asked yet
             int before = _agents.Count;
-            _agents = await TopologyDiscovery.CrawlAsync([], _heard.ToList(), _community, asked, _agents, progress, ct);
+            _agents = await TopologyDiscovery.CrawlAsync([], _heard.ToList(), snmp, asked, _agents, progress, ct);
             _asked = new HashSet<IPAddress>(asked);
+            _problems = new Dictionary<string, string>(snmp.Problems);
             if (IsDisposed) return;
             Rebuild(fit: _agents.Count != before);
             lblStatus.Text = Summary();
@@ -168,10 +224,42 @@ internal sealed class TopologyForm : Form
     {
         if (IsDisposed) return;
         var thisPc = new ThisPcInfo(Environment.MachineName, _adapter.MacString(), OwnIPv4()?.ToString(), _adapter.FriendlyName);
-        _graph = TopologyBuilder.Build(_devices, thisPc, _heard, _agents, Gateway(), _asked);
+        _graph = TopologyBuilder.Build(_mapDevices, thisPc, _heard, _agents, Gateway(), _asked, _answered, _problems);
         view.SetLayout(TopologyLayout.Layout(_graph), reset: fit);
         UpdateWarnings();
     }
+
+    /// <summary>
+    /// Profinet devices (with an address) that did not answer SNMP: their ports' neighbours from their own records
+    /// (PDPortDataReal over PNIO RPC), as PRONETA reads them. Sixteen at a time.
+    /// </summary>
+    private async Task<List<SnmpAgentData>> ReadProfinetAsync(List<SnmpAgentData> agents, IProgress<string> progress, CancellationToken ct)
+    {
+        var answeredSnmp = agents.Select(a => a.Ip).ToHashSet();
+        var profinet = _devices.Where(d => d.Sources.HasFlag(DiscoverySource.Profinet)
+                && d.IPAddress is { AddressFamily: AddressFamily.InterNetwork } ip && TopologyDiscovery.Askable(ip) && !answeredSnmp.Contains(ip))
+            .ToList();
+        if (profinet.Count == 0) return agents;
+        progress.Report($"Profinet: reading the port records of {profinet.Count} device(s) that don't answer SNMP...");
+        var found = new List<SnmpAgentData>();
+        using var gate = new SemaphoreSlim(16);
+        await Task.WhenAll(profinet.Select(async d =>
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var ports = await ProfinetRpc.ReadPortsAsync(d.IPAddress!, d.VendorId, d.DeviceId, TimeSpan.FromMilliseconds(700), ct)
+                    .ConfigureAwait(false);
+                if (ports.Count > 0) lock (found) found.Add(ProfinetRpc.ToAgent(d, ports));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { /* one device's trouble is not the map's */ }
+            finally { gate.Release(); }
+        }));
+        _profinetRead = found.Count;
+        return agents.Concat(found).ToList();
+    }
+
+    private int _profinetRead;
 
     /// <summary>Says, beside the status, why the map is not complete; the whole of it in the tooltip.</summary>
     private void UpdateWarnings()
@@ -183,9 +271,13 @@ internal sealed class TopologyForm : Form
         if (silent.Count > 0)
         {
             static string Name(TopoNode n) => n.Name.Length > 0 ? n.Name : n.Ip ?? n.Id;
-            var unanswered = silent.Where(n => n.Ip is { Length: > 0 }).ToList();
+            var refused = silent.Where(n => n.Ip is { Length: > 0 } ip && _problems.ContainsKey(ip)).ToList();
+            var unanswered = silent.Where(n => n.Ip is { Length: > 0 } ip && !_problems.ContainsKey(ip)).ToList();
             var noAddress = silent.Where(n => n.Ip is not { Length: > 0 }).ToList();
             shortText.Add($"No SNMP from {silent.Count} switch(es): {string.Join(", ", silent.Take(3).Select(Name))}{(silent.Count > 3 ? ", ..." : "")}");
+            if (refused.Count > 0)
+                longText.Add("These switches answer SNMP, but not to EthernetTools: " +
+                             string.Join("; ", refused.Select(n => $"{Name(n)} ({n.Ip}): {_problems[n.Ip!]}")) + ".");
             if (unanswered.Count > 0)
                 longText.Add($"These switches did not answer SNMP (community \"{_community}\"), so their ports and MAC tables are not known: " +
                              string.Join(", ", unanswered.Select(n => $"{Name(n)} ({n.Ip})")) + ". What is behind them shows as \"port not known\" " +
