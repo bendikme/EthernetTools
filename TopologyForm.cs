@@ -28,6 +28,8 @@ internal sealed class TopologyForm : Form
     private HashSet<string>? _answered;
     /// <summary>Why devices that answer SNMP refused (SNMPv3 reports), by address.</summary>
     private Dictionary<string, string> _problems = new();
+    /// <summary>Devices that speak only SNMPv3 and are made by a maker of switches and access points: address -> maker.</summary>
+    private Dictionary<string, string> _network = new();
     /// <summary>The last discovery has listened for LLDP on the adapter to the end.</summary>
     private bool _listened;
     private TopoGraph? _graph;
@@ -129,6 +131,7 @@ internal sealed class TopologyForm : Form
         _community = txtCommunity.Text.Trim();
         _asked = null;
         _answered = null;
+        _network = new Dictionary<string, string>();
         _listened = false;
         UpdateWarnings();
         var snmp = new SnmpSettings(_community, s_v3);
@@ -182,14 +185,29 @@ internal sealed class TopologyForm : Form
             _agents = await ReadProfinetAsync(_agents, progress, ct);
             Rebuild(fit: true);
 
-            // silent switches that speak SNMPv3 (without a user given, or not to it): say so
-            if (s_v3 is null && _graph is { } g)
+            // without a v3 user: which of the devices that stayed silent speak SNMPv3, and which of those are probably
+            // switches or access points (their maker, from the engine ID they give anyone, or from the MAC)
+            if (s_v3 is null)
             {
-                var v3Only = await Task.WhenAll(g.Silent.Where(n => n.Ip is { Length: > 0 } ip && !_problems.ContainsKey(ip))
-                    .Select(async n => (n.Ip!, await TopologyDiscovery.AnswersV3Async(IPAddress.Parse(n.Ip!), ct))));
-                foreach (var (ip, v3) in v3Only.Where(x => x.Item2))
-                    _problems[ip] = "it answers SNMPv3 only; enter a v3 user with SNMPv3... on the toolbar";
-                if (v3Only.Any(x => x.Item2)) Rebuild(fit: false);
+                lblStatus.Text = "SNMPv3: asking the devices that did not answer v1/v2c whether they speak SNMPv3...";
+                var answeredIps = _agents.Select(a => a.Ip.ToString()).ToHashSet();
+                var macByIp = new Dictionary<string, string>();
+                foreach (var d in _mapDevices) if (d.IPAddress is { } dip) macByIp.TryAdd(dip.ToString(), d.MacString);
+                foreach (var n in _graph?.Nodes ?? []) if (n.Ip is { } nip && n.Mac is { } nmac) macByIp.TryAdd(nip, nmac);
+                using var gate = new SemaphoreSlim(64);
+                var engines = await Task.WhenAll(asked.Where(ip => !answeredIps.Contains(ip.ToString())).Select(async ip =>
+                {
+                    await gate.WaitAsync(ct);
+                    try { return (Ip: ip.ToString(), Engine: await TopologyDiscovery.V3EngineAsync(ip, ct)); }
+                    finally { gate.Release(); }
+                }));
+                foreach (var (ip, engine) in engines)
+                {
+                    if (engine is null) continue;
+                    _problems.TryAdd(ip, "it answers SNMPv3 only; enter a v3 user with SNMPv3... on the toolbar");
+                    if (TopologyDiscovery.NetworkMaker(engine, macByIp.GetValueOrDefault(ip)) is { } maker) _network[ip] = maker;
+                }
+                Rebuild(fit: true);
             }
             lblStatus.Text = Summary() + "  Listening for LLDP on the adapter for a while longer...";
             bool listenedToTheEnd = true;
@@ -203,7 +221,7 @@ internal sealed class TopologyForm : Form
             int before = _agents.Count;
             _agents = await TopologyDiscovery.CrawlAsync([], _heard.ToList(), snmp, asked, _agents, progress, ct);
             _asked = new HashSet<IPAddress>(asked);
-            _problems = new Dictionary<string, string>(snmp.Problems);
+            foreach (var (ip, problem) in snmp.Problems) _problems[ip] = problem;
             if (IsDisposed) return;
             Rebuild(fit: _agents.Count != before);
             lblStatus.Text = Summary();
@@ -224,7 +242,7 @@ internal sealed class TopologyForm : Form
     {
         if (IsDisposed) return;
         var thisPc = new ThisPcInfo(Environment.MachineName, _adapter.MacString(), OwnIPv4()?.ToString(), _adapter.FriendlyName);
-        _graph = TopologyBuilder.Build(_mapDevices, thisPc, _heard, _agents, Gateway(), _asked, _answered, _problems);
+        _graph = TopologyBuilder.Build(_mapDevices, thisPc, _heard, _agents, Gateway(), _asked, _answered, _problems, _network);
         view.SetLayout(TopologyLayout.Layout(_graph), reset: fit);
         UpdateWarnings();
     }
@@ -267,14 +285,17 @@ internal sealed class TopologyForm : Form
         if (IsDisposed) return;
         var shortText = new List<string>();
         var longText = new List<string>();
-        var silent = _asked is null ? [] : _graph?.Silent ?? [];
+        // known switches first, then probable ones; real names before bare numbers
+        var silent = (_asked is null ? [] : _graph?.Silent ?? []).OrderBy(n => n.Guessed).ThenBy(n => n.Name.Length <= 2).ToList();
         if (silent.Count > 0)
         {
             static string Name(TopoNode n) => n.Name.Length > 0 ? n.Name : n.Ip ?? n.Id;
             var refused = silent.Where(n => n.Ip is { Length: > 0 } ip && _problems.ContainsKey(ip)).ToList();
             var unanswered = silent.Where(n => n.Ip is { Length: > 0 } ip && !_problems.ContainsKey(ip)).ToList();
             var noAddress = silent.Where(n => n.Ip is not { Length: > 0 }).ToList();
-            shortText.Add($"No SNMP from {silent.Count} switch(es): {string.Join(", ", silent.Take(3).Select(Name))}{(silent.Count > 3 ? ", ..." : "")}");
+            int v3Only = silent.Count(n => n.Ip is { } ip && _problems.TryGetValue(ip, out var p) && p.Contains("SNMPv3 only"));
+            shortText.Add($"No SNMP from {silent.Count} switch(es){(v3Only > 0 ? $", {v3Only} of them SNMPv3 only" : "")}: " +
+                          $"{string.Join(", ", silent.Take(3).Select(Name))}{(silent.Count > 3 ? ", ..." : "")}");
             if (refused.Count > 0)
                 longText.Add("These switches answer SNMP, but not to EthernetTools: " +
                              string.Join("; ", refused.Select(n => $"{Name(n)} ({n.Ip}): {_problems[n.Ip!]}")) + ".");

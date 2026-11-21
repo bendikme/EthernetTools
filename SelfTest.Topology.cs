@@ -409,6 +409,14 @@ internal static partial class SelfTest
         Check("a switch that refused (an SNMPv3 report) says why",
             refused.Silent.Single(n => n.Name == "core").Detail?.Contains("SNMPv3: unknown user name") == true);
 
+        var guessed = TopologyBuilder.Build(devices, pcInfo, heard, [a, b, pn1, pn2], IPAddress.Parse("10.0.0.254"), asked, null,
+            new Dictionary<string, string> { ["10.0.0.31"] = "it answers SNMPv3 only; enter a v3 user" },
+            new Dictionary<string, string> { ["10.0.0.31"] = "Cisco" });
+        var g31 = guessed.Nodes.SingleOrDefault(n => n.Ip == "10.0.0.31");
+        Check("a host that speaks only SNMPv3, made by a network maker: a probable switch, drawn on its own and named among the silent switches",
+            g31 is { Kind: TopoKind.Switch, Guessed: true, Vendor: "Cisco" } && g31.Detail?.Contains("Probably a switch") == true
+            && guessed.Silent.Contains(g31) && guessed.Links.Any(l => ReferenceEquals(l.B, g31) || ReferenceEquals(l.A, g31)));
+
         var layout = TopologyLayout.Layout(g);
         bool overlap = layout.Nodes.Any(x => layout.Nodes.Any(y => !ReferenceEquals(x, y) && RectangleF.Intersect(x.Box, y.Box) is { Width: > 0.5f, Height: > 0.5f }));
         Check("layout: every box placed once, none overlapping, This PC on top",

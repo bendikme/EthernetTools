@@ -235,6 +235,7 @@ internal sealed class TopologyView : Control
     {
         var n = p.Node;
         var (fill, border, tag) = Style(n.Kind);
+        if (n.Guessed) tag += "?";
         var r = p.Box;
         using var fillBrush = new SolidBrush(fill);
         using var pen = new Pen(hover ? Color.FromArgb(0, 120, 215) : border, hover ? 2.4f : 1.3f);
@@ -262,7 +263,7 @@ internal sealed class TopologyView : Control
         g.DrawString(Title(n), nameFont, text, new RectangleF(r.X + 7, r.Y + 6, r.Width - tagSize.Width - 14, 18), format);
         string second = n.Kind == TopoKind.Group
             ? $"{n.Members.Count} device(s){(n.UnknownMacs > 0 ? $" + {n.UnknownMacs} MAC(s)" : "")} - hover for the list"
-            : string.Join("  ", new[] { n.Ip, n.Kind is TopoKind.Profinet or TopoKind.Host ? n.Vendor : null, n.Ip is null ? n.Mac : null }
+            : string.Join("  ", new[] { n.Ip, n.Kind is TopoKind.Profinet or TopoKind.Host || n.Guessed ? n.Vendor : null, n.Ip is null ? n.Mac : null }
                 .Where(s => !string.IsNullOrEmpty(s)));
         g.DrawString(second, lineFont, dim, new RectangleF(r.X + 7, r.Y + 27, r.Width - 12, 16), format);
     }

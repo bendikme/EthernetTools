@@ -23,6 +23,8 @@ public sealed class TopoNode
     public int UnknownMacs { get; set; }
     /// <summary>It answered SNMP.</summary>
     public bool Managed { get; set; }
+    /// <summary>Its kind is a guess: a probable switch or access point (it speaks only SNMPv3, made by a network maker).</summary>
+    public bool Guessed { get; set; }
 
     public override string ToString() => $"{Kind} {Name}";
 }
@@ -75,9 +77,12 @@ public static class TopologyBuilder
     /// <param name="answeredMacs">The devices that answered just before the MAC tables were read (refreshing them): one
     /// missing from a readable switch's table is placed on This PC's side of that switch.</param>
     /// <param name="snmpProblems">Why a device that answers SNMP refused (an SNMPv3 report), by its address.</param>
+    /// <param name="networkDevices">Devices that speak only SNMPv3 and are made by a maker of switches and access points
+    /// (address -> maker): drawn as probable switches, not as hosts.</param>
     public static TopoGraph Build(IReadOnlyList<NetDevice> devices, ThisPcInfo thisPc, IReadOnlyList<LldpNeighbor> heardOnAdapter,
         IReadOnlyList<SnmpAgentData> agents, IPAddress? gateway, IReadOnlyCollection<IPAddress>? askedSnmp = null,
-        IReadOnlyCollection<string>? answeredMacs = null, IReadOnlyDictionary<string, string>? snmpProblems = null)
+        IReadOnlyCollection<string>? answeredMacs = null, IReadOnlyDictionary<string, string>? snmpProblems = null,
+        IReadOnlyDictionary<string, string>? networkDevices = null)
     {
         var graph = new TopoGraph();
         var byMac = new Dictionary<string, TopoNode>(StringComparer.OrdinalIgnoreCase);
@@ -138,6 +143,16 @@ public static class TopologyBuilder
             if (chassisMac is not null) byMac.TryAdd(chassisMac, node);
             agentNode[agent] = node;
         }
+
+        // ---- probable switches and access points: SNMPv3 only, a network maker -------------------------------------
+        foreach (var node in graph.Nodes)
+            if (node.Kind == TopoKind.Host && !node.Managed && node.Ip is { } nip && networkDevices?.TryGetValue(nip, out var maker) == true)
+            {
+                node.Kind = TopoKind.Switch;
+                node.Guessed = true;
+                node.Vendor = maker;
+                node.Detail = Join(node.Detail, $"Probably a switch or an access point ({maker}): it speaks SNMPv3 only.");
+            }
 
         // ---- LLDP: who is the neighbour? ------------------------------------------------------------------------
         var namedByLldp = new HashSet<TopoNode>();

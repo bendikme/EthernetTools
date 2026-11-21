@@ -75,6 +75,15 @@ public static class OuiLookup
 
         // ---- Networking ----------------------------------------------------
         ["00000C"] = "Cisco",
+        ["04EB40"] = "Cisco",
+        ["008E73"] = "Cisco",
+        ["EC0273"] = "HPE / Aruba",
+        ["3821C7"] = "HPE / Aruba",
+        ["20A6CD"] = "HPE / Aruba",
+        ["D015A6"] = "HPE / Aruba",
+        ["F42E7F"] = "HPE / Aruba",
+        ["D0D3E0"] = "HPE / Aruba",
+        ["4448C1"] = "HPE / Aruba",
         ["000142"] = "Cisco",
         ["001A2F"] = "Cisco",
         ["001CF6"] = "Cisco",

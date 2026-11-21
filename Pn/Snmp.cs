@@ -384,6 +384,9 @@ public sealed class SnmpClient
 
     // ---- SNMPv3 ---------------------------------------------------------------------------------------------------
 
+    /// <summary>SNMPv3: the engine ID engine discovery learned (null before, or when the agent did not answer).</summary>
+    public byte[]? EngineId => _engineId;
+
     /// <summary>SNMPv3 only: the agent answers engine discovery.</summary>
     public Task<bool> DiscoverEngineAsync(CancellationToken ct) =>
         Version == SnmpVersion.V3 ? DiscoverAsync(ct) : Task.FromResult(false);

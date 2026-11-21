@@ -212,9 +212,26 @@ public static class TopologyDiscovery
     }
 
     /// <summary>The agent at <paramref name="ip"/> answers SNMPv3 engine discovery (it has SNMPv3, whatever its users).</summary>
-    public static Task<bool> AnswersV3Async(IPAddress ip, CancellationToken ct) =>
-        new SnmpClient(ip, new SnmpV3Credentials("", SnmpAuth.None, "", SnmpPriv.None, ""), TimeSpan.FromSeconds(1), retries: 1)
-            .DiscoverEngineAsync(ct);
+    public static async Task<bool> AnswersV3Async(IPAddress ip, CancellationToken ct) => await V3EngineAsync(ip, ct) is not null;
+
+    /// <summary>The SNMPv3 engine ID the agent at <paramref name="ip"/> gives in engine discovery; null without SNMPv3.</summary>
+    public static async Task<byte[]?> V3EngineAsync(IPAddress ip, CancellationToken ct)
+    {
+        var client = new SnmpClient(ip, new SnmpV3Credentials("", SnmpAuth.None, "", SnmpPriv.None, ""), TimeSpan.FromSeconds(1), retries: 1);
+        return await client.DiscoverEngineAsync(ct).ConfigureAwait(false) ? client.EngineId : null;
+    }
+
+    /// <summary>
+    /// The maker of a device that speaks SNMPv3, when it is a maker of switches and access points: by its engine ID,
+    /// else by its MAC prefix. Null when neither says so (a printer, a server, a Linux box).
+    /// </summary>
+    public static string? NetworkMaker(byte[] engineId, string? mac)
+    {
+        string? byEngine = SnmpEngine.Maker(engineId);
+        if (byEngine is not null) return SnmpEngine.NetworkMakers.Contains(byEngine) ? byEngine : null;
+        string? byMac = mac is { Length: 17 } ? OuiLookup.Lookup(new PhysicalAddress(Convert.FromHexString(mac.Replace(":", "")))) : null;
+        return byMac is not null && SnmpEngine.NetworkMakers.Contains(byMac) ? byMac : null;
+    }
 
     /// <summary>
     /// Refreshes the switches' MAC tables just before they are read, and says who is there now: an ARP request to

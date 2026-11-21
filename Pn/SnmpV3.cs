@@ -21,6 +21,35 @@ public sealed record SnmpV3Credentials(string User, SnmpAuth Auth, string AuthPa
     public override string ToString() => $"{User} ({Level}, {Auth}{(Priv != SnmpPriv.None ? "/" + Priv : "")})";
 }
 
+/// <summary>
+/// Who made an SNMP agent, from its SNMPv3 engine ID: the first four bytes carry the maker's IANA enterprise number
+/// (RFC 3411; the older format, RFC 1910, the same without the top bit). Engine discovery answers it to anyone.
+/// </summary>
+public static class SnmpEngine
+{
+    private static readonly Dictionary<int, string> Makers = new()
+    {
+        [2] = "IBM", [9] = "Cisco", [11] = "HP", [171] = "D-Link", [248] = "Hirschmann", [311] = "Microsoft", [674] = "Dell",
+        [890] = "Zyxel", [1916] = "Extreme Networks", [2636] = "Juniper", [4329] = "Siemens", [4526] = "Netgear",
+        [8072] = "Net-SNMP", [8691] = "Moxa", [10642] = "Zebra", [11863] = "TP-Link", [14823] = "Aruba", [14988] = "MikroTik",
+        [41112] = "Ubiquiti",
+    };
+
+    /// <summary>Makers of switches and access points (an agent of theirs that speaks only SNMPv3 is likely one).</summary>
+    public static readonly HashSet<string> NetworkMakers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Cisco", "HP", "HPE / Aruba", "Aruba", "D-Link", "Hirschmann", "Zyxel", "Extreme Networks", "Juniper", "Siemens",
+        "Netgear", "Moxa", "TP-Link", "MikroTik", "Routerboard / MikroTik", "Ubiquiti", "Phoenix Contact", "Westermo",
+    };
+
+    public static int? Enterprise(byte[] engineId) =>
+        engineId.Length >= 5 ? (int)(System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(engineId) & 0x7FFFFFFF) : null;
+
+    /// <summary>The maker's name, or null when the engine ID names none this table knows (or none at all: 0).</summary>
+    public static string? Maker(byte[] engineId) =>
+        Enterprise(engineId) is { } e and > 0 && Makers.TryGetValue(e, out var name) ? name : null;
+}
+
 /// <summary>A USM report (RFC 3414 3.2): why the agent refused a request.</summary>
 public static class UsmReport
 {

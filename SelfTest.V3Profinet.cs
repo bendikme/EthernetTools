@@ -51,6 +51,17 @@ internal static partial class SelfTest
             Check("SNMPv3 dialog: \"Don't use SNMPv3\" clears the user", dialog.Credentials is null && dialog.DialogResult == DialogResult.OK);
         }
 
+        // the maker from the engine ID (engine IDs as real agents on the office LAN give them)
+        byte[] E(string hex) => Convert.FromHexString(hex);
+        Check("engine ID -> maker: Aruba (14823), HP (11, the old format), Net-SNMP (8072); a bare 0000000001 names none",
+            SnmpEngine.Maker(E("000039E7000020A6CDC20458")) == "Aruba" && SnmpEngine.Maker(E("0000000B0000EC0273376E20")) == "HP"
+            && SnmpEngine.Maker(E("80001F88030021B77FC7FB")) == "Net-SNMP" && SnmpEngine.Maker(E("0000000001")) is null);
+        Check("a network maker: by the engine ID first (a Linux agent is not one, whatever its MAC), else by the MAC prefix",
+            TopologyDiscovery.NetworkMaker(E("000039E7000020A6CDC20458"), "20:A6:CD:C2:04:58") == "Aruba"
+            && TopologyDiscovery.NetworkMaker(E("80001F8804286E6F6E6529"), "00:8E:73:00:00:01") is null
+            && TopologyDiscovery.NetworkMaker(E("0000000001"), "00:8E:73:2A:18:06") == "Cisco"
+            && TopologyDiscovery.NetworkMaker(E("0000000001"), "02:AA:00:00:00:01") is null);
+
         var table = Enumerable.Range(1, 30).Select(i => Int($"{TopologyDiscovery.Dot1dTpFdbPort}.0.1.2.3.4.{i}", i))
             .Append(Str(TopologyDiscovery.SysName, "core-v3")).ToList();
         (string? Name, string? Error, int Rows) Ask(SnmpV3Credentials agentUser, SnmpV3Credentials clientUser)

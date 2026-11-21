@@ -107,6 +107,10 @@ SNMP is read-only, v2c with a fallback to v1, community `public` unless you type
 asked before v2c and v1. The user is kept in memory until EthernetTools closes, never saved. A switch that only
 speaks SNMPv3 is named in the status bar's warning when no user is given; one that refuses the user says why
 (unknown user name, wrong password ...).
+Without a user, every device that stays silent on v1/v2c is asked whether it speaks SNMPv3. The maker in the
+SNMPv3 engine ID it gives anyone (or else its MAC prefix) tells switches and access points from printers and
+servers. Those made by a network maker (Cisco, HPE/Aruba, Netgear, ...) are drawn as **SWITCH?** boxes, named in
+the warning, and a v3 user would let the map read their tables too.
 Tables are read with GETBULK. A device that answers GETBULK with an error, or not at all (some small embedded
 agents do), is read again with fewer rows per request, then with GETNEXT.
 The window asks every scanned device, then follows LLDP: the management address a neighbour announces is asked
